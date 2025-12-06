@@ -33,6 +33,13 @@ st.markdown("""
         border-radius: 10px;
         margin: 10px 0;
     }
+    .cart-item {
+        background-color: #fff3cd;
+        padding: 10px;
+        border-radius: 8px;
+        margin: 5px 0;
+        border-left: 4px solid #ffc107;
+    }
     .order-success {
         background-color: #d4edda;
         padding: 15px;
@@ -44,6 +51,13 @@ st.markdown("""
         padding: 10px;
         border-radius: 8px;
         text-align: center;
+    }
+    .coupon-badge {
+        background-color: #28a745;
+        color: white;
+        padding: 3px 8px;
+        border-radius: 4px;
+        font-size: 0.8em;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -70,13 +84,54 @@ with st.sidebar:
     st.title("🛒 E-Commerce Chatbot")
     st.markdown("---")
     
+    # Shopping Cart Display
+    if st.session_state.initialized:
+        cart = st.session_state.chatbot.cart
+        
+        st.markdown("### 🛒 Shopping Cart")
+        if cart.is_empty:
+            st.info("Your cart is empty")
+        else:
+            for item in cart.items:
+                st.markdown(f"""
+                <div class="cart-item">
+                    <strong>{item.product_name}</strong><br>
+                    {item.quantity}x @ ${item.unit_price:.2f} = ${item.subtotal:.2f}
+                </div>
+                """, unsafe_allow_html=True)
+            
+            st.markdown(f"**Subtotal:** ${cart.subtotal:.2f}")
+            if cart.discount_percent > 0:
+                st.markdown(f"**Discount ({cart.coupon_code}):** -${cart.discount_amount:.2f}")
+            st.markdown(f"**Tax (8%):** ${cart.tax_amount:.2f}")
+            if cart.shipping_cost > 0:
+                st.markdown(f"**Shipping:** ${cart.shipping_cost:.2f}")
+            else:
+                st.markdown("**Shipping:** FREE ✓")
+            st.markdown(f"### Total: ${cart.total:.2f}")
+            
+            # Coupon code input
+            with st.expander("🎟️ Have a coupon?"):
+                coupon = st.text_input("Enter code:", key="coupon_input")
+                if st.button("Apply"):
+                    success, msg = cart.apply_coupon(coupon)
+                    if success:
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+                st.caption("Try: SAVE10, SAVE20, DEMO")
+        
+        st.markdown("---")
+    
     st.markdown("### 💡 Try These Commands:")
     st.markdown("""
-    - "Show me laptops"
-    - "What phones do you have?"
-    - "How much is the MacBook Pro?"
-    - "I want to buy the iPhone"
-    - "Show me headphones under $300"
+    - "Show me laptops under $1500"
+    - "Add iPhone to my cart"
+    - "What's in my cart?"
+    - "Apply coupon DEMO"
+    - "Checkout"
+    - "Show similar products"
     """)
     
     st.markdown("---")
@@ -98,6 +153,11 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
     
+    if st.button("🛒 Clear Cart", use_container_width=True):
+        if st.session_state.initialized:
+            st.session_state.chatbot.cart.clear()
+            st.rerun()
+    
     if st.button("📦 View Orders", use_container_width=True):
         st.session_state.show_orders = True
     
@@ -105,8 +165,9 @@ with st.sidebar:
     st.markdown("### 🛠️ Tech Stack")
     st.markdown("""
     - **LLM**: GPT-4o-mini (OpenRouter)
-    - **RAG**: Keyword Search
+    - **Search**: Hybrid BM25 + Semantic
     - **Database**: SQLite
+    - **Cart**: Multi-item support
     - **Validation**: Pydantic
     - **Tracing**: Langfuse
     """)

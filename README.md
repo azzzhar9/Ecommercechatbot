@@ -6,10 +6,18 @@ This project implements an intelligent e-commerce chatbot that combines Retrieva
 
 The system uses ChromaDB for vector storage, SQLite for order persistence, and OpenAI's GPT models (via OpenRouter API) with function calling for intelligent agent orchestration. All prices are retrieved from vector store metadata to ensure accuracy, and orders are validated using Pydantic models before database persistence. The implementation includes comprehensive error handling, input sanitization, stock verification, and order confirmation workflows.
 
-### New Features
-- **Streamlit Web UI**: Beautiful chat interface for demos and live presentations
-- **Langfuse Tracing**: Full observability with trace logging for every conversation
-- **OpenRouter Support**: Use GPT-4o-mini via OpenRouter API for cost-effective inference
+### Key Features
+
+| Feature | Description |
+|---------|-------------|
+| **Hybrid BM25 Search** | Advanced search combining BM25 ranking with semantic matching |
+| **Shopping Cart** | Multi-product cart with tax, shipping, and coupon support |
+| **Product Recommendations** | Similarity-based recommendations during conversation |
+| **Streamlit Web UI** | Beautiful chat interface for demos and live presentations |
+| **Langfuse Tracing** | Full observability with trace logging for every conversation |
+| **OpenRouter Support** | Use GPT-4o-mini via OpenRouter API for cost-effective inference |
+| **Session Memory** | Remembers browsed products within session |
+| **Coupon System** | Apply discount codes (SAVE10, SAVE20, DEMO) |
 
 ## Architecture
 
@@ -18,17 +26,26 @@ The system follows a two-agent architecture with clear separation of concerns:
 ```
 User Input (CLI or Streamlit UI)
     ↓
-Chatbot (Main Orchestrator)
+┌─────────────────────────────────────────┐
+│         Chatbot Orchestrator            │
+│  (Session Memory, Cart, Function Call)  │
+└─────────────────────────────────────────┘
     ↓
-┌─────────────────┬─────────────────┐
-│                 │                 │
-RAG Agent    Function Calling   Order Agent
-│                 │                 │
-↓                 ↓                 ↓
-Vector Store   OpenRouter API   Database
-(ChromaDB)     (GPT-4o-mini)    (SQLite)
+┌───────────┬───────────────┬─────────────┐
+│           │               │             │
+│ RAG Agent │ Cart Manager  │ Order Agent │
+│           │               │             │
+└───────────┴───────────────┴─────────────┘
+    ↓             ↓               ↓
+┌─────────┐ ┌───────────┐ ┌─────────────┐
+│ Hybrid  │ │  Shopping │ │  Database   │
+│ Search  │ │   Cart    │ │  (SQLite)   │
+│ (BM25)  │ │ (Coupons) │ │             │
+└─────────┴─┴───────────┴─┴─────────────┘
     ↓
-Langfuse Tracing (Observability)
+┌─────────────────────────────────────────┐
+│  Langfuse Tracing (Observability)       │
+└─────────────────────────────────────────┘
 ```
 
 **Agent Workflow:**
@@ -134,8 +151,83 @@ Then open **http://localhost:8501** in your browser.
 - 🎨 Dark theme styling
 - 🔄 Reset conversation button
 - 📊 Langfuse tracing integration
+- 🛒 Live shopping cart in sidebar
+- 🎟️ Coupon code support
 
-### Example Conversation
+### Example Queries
+
+#### Product Search
+| Query | Description |
+|-------|-------------|
+| "Show me laptops" | Basic product search |
+| "What phones do you have?" | Category browsing |
+| "Show me laptops under $1500" | Price-filtered search |
+| "cheap phones" | Budget-friendly search |
+| "expensive headphones" | Premium product search |
+| "gaming accessories" | Category search |
+
+#### Shopping Cart
+| Query | Description |
+|-------|-------------|
+| "Add iPhone 15 Pro to my cart" | Add single item |
+| "Add 2 MacBooks to cart" | Add multiple quantity |
+| "What's in my cart?" | View cart contents |
+| "Remove iPhone from cart" | Remove item |
+| "Clear my cart" | Empty the cart |
+
+#### Coupons & Checkout
+| Query | Description |
+|-------|-------------|
+| "Apply coupon DEMO" | 25% discount |
+| "Apply coupon SAVE10" | 10% discount |
+| "Apply coupon SAVE20" | 20% discount |
+| "Apply coupon WELCOME" | 15% discount |
+| "Checkout" | Process order for all cart items |
+
+#### Recommendations
+| Query | Description |
+|-------|-------------|
+| "Show me similar products" | Based on last viewed |
+| "What else do you recommend?" | Get recommendations |
+| "Products like MacBook Pro" | Specific recommendations |
+
+### Example Conversation (Cart Flow)
+
+```
+You: Show me phones under $1000
+Bot: The Google Pixel 8 Pro is priced at $899.99 and is currently in stock...
+
+You: Add Google Pixel 8 Pro to my cart
+Bot: Added 1x Google Pixel 8 Pro to your cart! 🛒
+     Cart now has 1 item(s). Total: $971.99
+
+You: Add AirPods Pro too
+Bot: Added 1x AirPods Pro to your cart! 🛒
+     Cart now has 2 item(s). Total: $1241.98
+
+You: Apply coupon DEMO
+Bot: Coupon applied! 25% discount
+     New total: $1007.48
+
+You: Checkout
+Bot: ✅ Order Confirmed!
+     
+     ** Shopping Cart **
+     - Google Pixel 8 Pro x1 @ $899.99 = $899.99
+     - AirPods Pro x1 @ $249.99 = $249.99
+     
+     Subtotal: $1149.98
+     Discount (DEMO - 25%): -$287.50
+     Tax (8%): $68.99
+     Shipping: FREE
+     
+     **Total: $931.48**
+     
+     Order ID(s): ORD-ABC12345, ORD-DEF67890
+     Thank you for your purchase! 🎉
+```
+
+### Example Conversation (Direct Order)
 
 ```
 You: What's the price of iPhone 15 Pro?
@@ -153,8 +245,6 @@ Bot: Perfect! Let me process your order for the iPhone 15 Pro...
      Unit Price: $999.99
      Total: $1999.98
      ==================================================
-
-     Confirm this order? (yes/no): yes
 
 Bot: Your order has been confirmed!
      Order ID: #ORD-ABC12345
@@ -224,6 +314,51 @@ for order in orders:
 ```
 
 ## Technical Decisions
+
+### Why Hybrid BM25 Search?
+
+The hybrid search engine combines multiple ranking signals for superior product retrieval:
+
+| Component | Purpose |
+|-----------|---------|
+| **BM25 Scoring** | Term frequency with document length normalization |
+| **Synonym Expansion** | "phone" → ["phone", "iphone", "samsung", "galaxy", "smartphone"] |
+| **Price Filtering** | Automatic extraction of "under $X", "cheap", "premium" |
+| **Name Match Bonus** | Higher weight for matches in product name |
+| **Stock Bonus** | In-stock products ranked higher |
+
+This approach provides:
+- Fast keyword matching without embedding API calls
+- Intelligent query understanding (price filters, synonyms)
+- Relevance ranking that prioritizes exact matches
+- OpenRouter compatibility (no embedding API needed)
+
+### Why Shopping Cart?
+
+The cart system enables realistic e-commerce flows:
+
+| Feature | Benefit |
+|---------|---------|
+| Multi-product orders | "Add laptop and mouse to cart" |
+| Tax calculation | 8% automatic tax |
+| Shipping logic | Free shipping over $100 |
+| Coupon system | SAVE10, SAVE20, DEMO, WELCOME |
+| Session persistence | Cart survives page refresh |
+
+### Function Tools Available
+
+The chatbot uses 7 function tools for autonomous operation:
+
+| Function | Trigger Examples | Purpose |
+|----------|-----------------|---------|
+| `search_products` | "Show me phones", "laptops under $1000" | Hybrid product search |
+| `add_to_cart` | "Add iPhone to cart", "I want this" | Add items to cart |
+| `view_cart` | "What's in my cart?", "Show cart" | Display cart contents |
+| `remove_from_cart` | "Remove laptop from cart" | Remove cart items |
+| `apply_coupon` | "Apply coupon DEMO" | Apply discount codes |
+| `checkout` | "Checkout", "Place order", "Buy now" | Process cart order |
+| `get_recommendations` | "Similar products", "Recommend" | Product suggestions |
+| `create_order` | "I'll take 2 of them" | Direct single-item order |
 
 ### Why RAG for Products?
 
@@ -413,13 +548,50 @@ streamlit run streamlit_app.py --server.headless true
 
 ## Future Enhancements
 
-- ~~Web interface (Streamlit/Gradio)~~ ✅ **DONE** - Streamlit UI implemented
-- ~~Langfuse tracing~~ ✅ **DONE** - Full observability added
-- Multi-user session handling
-- Email confirmation simulation
-- Payment API mock integration
-- Async/await for concurrent operations
-- Caching for popular products
+### ✅ Completed Enhancements
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Web Interface | ✅ DONE | Streamlit UI with cart sidebar |
+| Langfuse Tracing | ✅ DONE | Full observability for every conversation |
+| Hybrid BM25 Search | ✅ DONE | Fast keyword search with synonym expansion |
+| Shopping Cart | ✅ DONE | Multi-product cart with tax, shipping, coupons |
+| Product Recommendations | ✅ DONE | Similarity-based suggestions |
+| Price Filtering | ✅ DONE | "under $X", "cheap", "premium" queries |
+
+### 🚀 Suggestions for Extra Credit
+
+| Enhancement | Description | Difficulty |
+|-------------|-------------|------------|
+| **Unit Test Coverage Expansion** | Increase coverage around cart manager and hybrid search logic | Medium |
+| **Streaming Chat Responses** | Partial streaming improves UX for longer answers | Medium |
+| **Multi-user Session Isolation** | Per-session cart and memory using session keys in DB or Redis | Hard |
+| **Payment Simulation + Order Status** | Simple stub or state transition (Pending → Paid → Fulfilled) | Medium |
+| **Categorization LLM Fallback** | If metadata missing, classify product by description | Easy |
+
+### Implementation Notes for Future Work
+
+**Streaming Responses:**
+```python
+# Use OpenAI streaming API
+for chunk in client.chat.completions.create(..., stream=True):
+    yield chunk.choices[0].delta.content
+```
+
+**Multi-user Sessions:**
+```python
+# Store cart per session ID in Redis
+cart_key = f"cart:{session_id}"
+redis.hset(cart_key, product_id, quantity)
+```
+
+**Order Status Transitions:**
+```python
+class OrderStatus(Enum):
+    PENDING = "pending"
+    PAID = "paid"
+    SHIPPED = "shipped"
+    FULFILLED = "fulfilled"
+```
 
 ## Langfuse Tracing
 
@@ -477,11 +649,13 @@ AIFinalProject/
 │   └── products.json             # Product catalog (35 products)
 ├── src/
 │   ├── __init__.py
-│   ├── chatbot.py                # Main chatbot orchestrator
+│   ├── chatbot.py                # Main chatbot orchestrator (7 function tools)
 │   ├── database.py               # SQLite operations
 │   ├── models.py                 # Pydantic validation models
 │   ├── logger.py                 # Logging configuration
-│   ├── tracing.py                # Langfuse tracing utilities
+│   ├── tracing.py                # Langfuse tracing utilities (v3.x API)
+│   ├── search.py                 # Hybrid BM25 search engine (NEW)
+│   ├── cart.py                   # Shopping cart with coupons (NEW)
 │   ├── initialize_vector_store.py # Vector store setup
 │   └── agents/
 │       ├── __init__.py

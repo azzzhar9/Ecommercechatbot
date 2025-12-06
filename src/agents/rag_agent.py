@@ -8,6 +8,7 @@ from chromadb.config import Settings
 from openai import OpenAI
 
 from src.logger import get_logger
+from src.search import get_search_engine, HybridSearch
 
 logger = get_logger()
 
@@ -55,36 +56,60 @@ class RAGAgent:
         except Exception as e:
             logger.error(f"Error initializing vector store connection: {str(e)}", exc_info=True)
             raise
+        
+        # Initialize hybrid search engine
+        self.hybrid_search = get_search_engine()
     
     def search_products(
         self,
         query: str,
-        k: int = 3,
-        max_retries: int = 3
+        k: int = 5,
+        max_retries: int = 3,
+        sort_by: str = 'relevance'
     ) -> List[Dict]:
         """
-        Search for products using keyword search (OpenRouter doesn't support embeddings API).
+        Search for products using hybrid BM25 + semantic search.
         
         Args:
             query: Search query
             k: Number of results to return
             max_retries: Maximum retry attempts (unused, kept for compatibility)
+            sort_by: Sort order ('relevance', 'price_low', 'price_high')
         
         Returns:
             List of product dictionaries with metadata
         """
-        # Use keyword search since OpenRouter doesn't support embeddings API
-        # Vector search would require separate OpenAI API key for embeddings
         logger.info(f"Searching products with query: {query}")
-        products = self._keyword_search(query, k)
+        
+        # Use hybrid search engine (BM25 + semantic matching)
+        products = self.hybrid_search.search(query, k=k, sort_by=sort_by)
         
         if products:
             self.last_product = products[0].get('name')
             logger.info(f"Found {len(products)} products for query: {query}")
         else:
-            logger.warning(f"No products found for query: {query}")
+            # Fallback to basic keyword search
+            products = self._keyword_search(query, k)
+            if products:
+                self.last_product = products[0].get('name')
+                logger.info(f"Fallback found {len(products)} products for query: {query}")
+            else:
+                logger.warning(f"No products found for query: {query}")
         
         return products
+    
+    def get_recommendations(self, product_name: str, k: int = 3) -> List[Dict]:
+        """
+        Get product recommendations based on a product.
+        
+        Args:
+            product_name: Name of the reference product
+            k: Number of recommendations
+        
+        Returns:
+            List of recommended products
+        """
+        return self.hybrid_search.get_recommendations(product_name, k=k)
 
     def _keyword_search(self, query: str, k: int = 3) -> List[Dict]:
         """Keyword-based search using products.json directly."""

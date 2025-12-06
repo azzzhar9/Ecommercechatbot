@@ -11,6 +11,7 @@ from src.agents.rag_agent import RAGAgent
 from src.database import init_database
 from src.logger import get_logger, setup_logger
 from src.tracing import get_tracer, traced
+from src.cart import ShoppingCart, CartManager
 
 logger = get_logger()
 
@@ -69,6 +70,12 @@ class EcommerceChatbot:
         self.pending_order: Optional[Dict] = None
         self.order_count = 0
         
+        # Initialize shopping cart
+        self.cart = CartManager.get_cart(self.session_id)
+        
+        # Session memory for browsed products
+        self.browsed_products: List[Dict] = []
+        
         # Initialize Langfuse tracer
         self.tracer = get_tracer()
         
@@ -106,13 +113,18 @@ class EcommerceChatbot:
                 "type": "function",
                 "function": {
                     "name": "search_products",
-                    "description": "Search for products by name, category, or description. Use this when the user asks about product information, prices, or availability.",
+                    "description": "Search for products by name, category, or description. Use this when the user asks about product information, prices, or availability. Supports filters like 'laptops under $1000' or 'cheap phones'.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "query": {
                                 "type": "string",
-                                "description": "Search query for products (e.g., 'iPhone', 'laptops under $1000', 'running shoes')"
+                                "description": "Search query for products (e.g., 'iPhone', 'laptops under $1000', 'cheap phones')"
+                            },
+                            "sort_by": {
+                                "type": "string",
+                                "enum": ["relevance", "price_low", "price_high"],
+                                "description": "Sort order for results"
                             }
                         },
                         "required": ["query"]
@@ -122,8 +134,119 @@ class EcommerceChatbot:
             {
                 "type": "function",
                 "function": {
+                    "name": "add_to_cart",
+                    "description": "Add a product to the shopping cart. Use when user says 'add to cart', 'I want this', 'add X to my cart'.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "product_name": {
+                                "type": "string",
+                                "description": "Name of the product to add"
+                            },
+                            "quantity": {
+                                "type": "integer",
+                                "description": "Quantity to add (default 1)",
+                                "minimum": 1,
+                                "default": 1
+                            },
+                            "unit_price": {
+                                "type": "number",
+                                "description": "Unit price of the product"
+                            }
+                        },
+                        "required": ["product_name", "unit_price"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "view_cart",
+                    "description": "View the current shopping cart contents. Use when user asks 'show my cart', 'what's in my cart', 'view cart'.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": []
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "remove_from_cart",
+                    "description": "Remove a product from the shopping cart.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "product_name": {
+                                "type": "string",
+                                "description": "Name of the product to remove"
+                            }
+                        },
+                        "required": ["product_name"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "apply_coupon",
+                    "description": "Apply a coupon code to the cart for a discount.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "coupon_code": {
+                                "type": "string",
+                                "description": "The coupon code to apply (e.g., SAVE10, SAVE20, WELCOME)"
+                            }
+                        },
+                        "required": ["coupon_code"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "checkout",
+                    "description": "Checkout and place an order for all items in the cart. Use when user says 'checkout', 'place order', 'buy now', 'complete order'.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "customer_name": {
+                                "type": "string",
+                                "description": "Customer name (optional)"
+                            },
+                            "customer_email": {
+                                "type": "string",
+                                "description": "Customer email address (optional)"
+                            }
+                        },
+                        "required": []
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_recommendations",
+                    "description": "Get product recommendations based on a product. Use when user asks for similar products or recommendations.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "product_name": {
+                                "type": "string",
+                                "description": "Name of the product to get recommendations for"
+                            }
+                        },
+                        "required": ["product_name"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "create_order",
-                    "description": "Create a new order for a product. Use this ONLY when the user explicitly confirms they want to place an order (e.g., 'I'll take it', 'place order', 'buy', 'confirm').",
+                    "description": "Create a single order directly (bypasses cart). Use for quick single-item purchases.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -147,7 +270,7 @@ class EcommerceChatbot:
                             },
                             "customer_email": {
                                 "type": "string",
-                                "description": "Customer email address (optional, must be valid format)"
+                                "description": "Customer email address (optional)"
                             }
                         },
                         "required": ["product_name", "quantity", "unit_price"]
@@ -170,11 +293,13 @@ class EcommerceChatbot:
         try:
             if function_name == "search_products":
                 query = arguments.get("query", "")
-                products = self.rag_agent.search_products(query, k=5)
+                sort_by = arguments.get("sort_by", "relevance")
+                products = self.rag_agent.search_products(query, k=5, sort_by=sort_by)
                 
                 if products:
-                    # Update last product
+                    # Update last product and browsed products
                     self.last_product = products[0]['name']
+                    self.browsed_products.extend(products[:3])  # Remember top 3
                 
                 # Format results
                 result_text = "\n\n".join([
@@ -190,6 +315,126 @@ class EcommerceChatbot:
                     "success": True,
                     "result": f"Found {len(products)} product(s):\n\n{result_text}" if products else "No products found.",
                     "products": products
+                }
+            
+            elif function_name == "add_to_cart":
+                product_name = arguments.get("product_name", "")
+                quantity = arguments.get("quantity", 1)
+                unit_price = arguments.get("unit_price", 0.0)
+                
+                self.cart.add_item(
+                    product_id=product_name.lower().replace(" ", "_"),
+                    product_name=product_name,
+                    unit_price=unit_price,
+                    quantity=quantity
+                )
+                
+                return {
+                    "success": True,
+                    "result": f"Added {quantity}x {product_name} to your cart! 🛒\n\nCart now has {self.cart.item_count} item(s). Total: ${self.cart.total:.2f}",
+                    "cart": self.cart.to_dict()
+                }
+            
+            elif function_name == "view_cart":
+                if self.cart.is_empty:
+                    return {
+                        "success": True,
+                        "result": "Your cart is empty. Browse our products to add items!"
+                    }
+                return {
+                    "success": True,
+                    "result": self.cart.get_summary(),
+                    "cart": self.cart.to_dict()
+                }
+            
+            elif function_name == "remove_from_cart":
+                product_name = arguments.get("product_name", "")
+                if self.cart.remove_item(product_name):
+                    return {
+                        "success": True,
+                        "result": f"Removed {product_name} from your cart."
+                    }
+                return {
+                    "success": False,
+                    "result": f"'{product_name}' not found in your cart."
+                }
+            
+            elif function_name == "apply_coupon":
+                coupon_code = arguments.get("coupon_code", "")
+                success, message = self.cart.apply_coupon(coupon_code)
+                return {
+                    "success": success,
+                    "result": message + (f"\nNew total: ${self.cart.total:.2f}" if success else "")
+                }
+            
+            elif function_name == "checkout":
+                if self.cart.is_empty:
+                    return {
+                        "success": False,
+                        "result": "Your cart is empty. Add products before checking out!"
+                    }
+                
+                customer_name = arguments.get("customer_name")
+                customer_email = arguments.get("customer_email")
+                
+                if customer_name:
+                    self.cart.customer_name = customer_name
+                if customer_email:
+                    self.cart.customer_email = customer_email
+                
+                # Create orders for each item
+                order_ids = []
+                for item in self.cart.items:
+                    order_data = {
+                        "product_name": item.product_name,
+                        "quantity": item.quantity,
+                        "customer_name": self.cart.customer_name,
+                        "customer_email": self.cart.customer_email
+                    }
+                    success, message, order_id = self.order_agent.process_order(order_data)
+                    if success:
+                        order_ids.append(order_id)
+                        self.order_count += 1
+                
+                # Generate receipt
+                receipt = f"""
+✅ **Order Confirmed!**
+
+{self.cart.get_summary()}
+
+Order ID(s): {', '.join(order_ids)}
+
+Thank you for your purchase! 🎉
+"""
+                
+                # Clear cart after checkout
+                self.cart.clear()
+                
+                return {
+                    "success": True,
+                    "result": receipt,
+                    "order_ids": order_ids
+                }
+            
+            elif function_name == "get_recommendations":
+                product_name = arguments.get("product_name", "")
+                if not product_name and self.last_product:
+                    product_name = self.last_product
+                
+                recommendations = self.rag_agent.get_recommendations(product_name, k=3)
+                
+                if recommendations:
+                    result_text = "Based on your interest, you might also like:\n\n"
+                    for p in recommendations:
+                        result_text += f"• **{p['name']}** - ${p['price']:.2f}\n"
+                    return {
+                        "success": True,
+                        "result": result_text,
+                        "products": recommendations
+                    }
+                return {
+                    "success": False,
+                    "result": "No recommendations available."
                 }
             
             elif function_name == "create_order":

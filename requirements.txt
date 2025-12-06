@@ -1,7 +1,17 @@
+# Core dependencies
 openai>=1.12.0
 pydantic>=2.5.0
 chromadb>=0.4.22
 sqlalchemy>=2.0.25
 python-dotenv>=1.0.0
 typing-extensions>=4.9.0
+
+# Web UI
+streamlit>=1.32.0
+
+# Observability & Tracing
+langfuse>=3.0.0
+
+# Testing
+pytest>=7.4.0
 

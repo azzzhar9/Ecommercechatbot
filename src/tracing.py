@@ -68,19 +68,17 @@ class LangfuseTracer:
         metadata: Optional[Dict] = None,
         tags: Optional[list] = None
     ):
-        """Create a new trace."""
+        """Create a new trace using span."""
         if not self.enabled or not self.client:
             return DummyTrace(name)
         
         try:
-            trace = self.client.trace(
+            # New Langfuse API uses start_span instead of trace
+            span = self.client.start_span(
                 name=name,
-                session_id=session_id,
-                user_id=user_id,
-                metadata=metadata or {},
-                tags=tags or []
+                metadata=metadata or {}
             )
-            return TraceWrapper(trace)
+            return SpanWrapper(span)
         except Exception as e:
             print(f"[Langfuse] Error creating trace: {e}")
             return DummyTrace(name)
@@ -93,13 +91,13 @@ class LangfuseTracer:
         metadata: Optional[Dict] = None
     ):
         """Create a span within a trace."""
-        if not self.enabled or isinstance(trace, DummyTrace):
+        if not self.enabled or isinstance(trace, (DummyTrace, DummySpan)):
             return DummySpan(name)
         
         try:
-            span = trace.trace.span(
+            # New API - start_span directly
+            span = self.client.start_span(
                 name=name,
-                input=input,
                 metadata=metadata or {}
             )
             return SpanWrapper(span)
@@ -118,16 +116,15 @@ class LangfuseTracer:
         metadata: Optional[Dict] = None
     ):
         """Log an LLM generation."""
-        if not self.enabled or isinstance(trace, DummyTrace):
+        if not self.enabled or isinstance(trace, (DummyTrace, DummySpan)):
             return DummyGeneration(name)
         
         try:
-            gen = trace.trace.generation(
+            # New API - start_generation
+            gen = self.client.start_generation(
                 name=name,
                 model=model,
                 input=input,
-                output=output,
-                usage=usage,
                 metadata=metadata or {}
             )
             return GenerationWrapper(gen)
