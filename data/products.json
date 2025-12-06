@@ -1,0 +1,283 @@
+[
+  {
+    "product_id": "PROD001",
+    "name": "iPhone 15 Pro",
+    "description": "Latest iPhone with A17 Pro chip, 256GB storage, Pro camera system with 48MP main camera, Action Button, and titanium design. Features 6.1-inch Super Retina XDR display.",
+    "price": 999.99,
+    "category": "Electronics",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD002",
+    "name": "Samsung Galaxy S24 Ultra",
+    "description": "Premium Android smartphone with Snapdragon 8 Gen 3, 256GB storage, 200MP camera, S Pen support, and 6.8-inch Dynamic AMOLED display. Built with titanium frame.",
+    "price": 1199.99,
+    "category": "Electronics",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD003",
+    "name": "MacBook Pro 14-inch",
+    "description": "Apple MacBook Pro with M3 chip, 16GB RAM, 512GB SSD, 14.2-inch Liquid Retina XDR display. Perfect for professionals and creative work.",
+    "price": 1999.99,
+    "category": "Electronics",
+    "stock_status": "low_stock"
+  },
+  {
+    "product_id": "PROD004",
+    "name": "Dell XPS 15",
+    "description": "Premium laptop with Intel Core i7, 16GB RAM, 512GB SSD, NVIDIA RTX 4050, 15.6-inch OLED display. Ideal for content creation and gaming.",
+    "price": 1799.99,
+    "category": "Electronics",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD005",
+    "name": "Sony WH-1000XM5 Headphones",
+    "description": "Industry-leading noise canceling wireless headphones with 30-hour battery life, quick charge, and premium sound quality. Perfect for travel and work.",
+    "price": 399.99,
+    "category": "Electronics",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD006",
+    "name": "AirPods Pro (2nd Gen)",
+    "description": "Apple AirPods Pro with Active Noise Cancellation, Spatial Audio, Adaptive EQ, and MagSafe charging case. Up to 6 hours of listening time.",
+    "price": 249.99,
+    "category": "Electronics",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD007",
+    "name": "iPad Air",
+    "description": "Apple iPad Air with M2 chip, 256GB storage, 10.9-inch Liquid Retina display, Touch ID, and support for Apple Pencil. Available in multiple colors.",
+    "price": 749.99,
+    "category": "Electronics",
+    "stock_status": "low_stock"
+  },
+  {
+    "product_id": "PROD008",
+    "name": "Nintendo Switch OLED",
+    "description": "Nintendo Switch with 7-inch OLED screen, 64GB internal storage, enhanced audio, and wide adjustable stand. Includes Joy-Con controllers.",
+    "price": 349.99,
+    "category": "Electronics",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD009",
+    "name": "PlayStation 5",
+    "description": "Sony PlayStation 5 console with 825GB SSD, DualSense wireless controller, 4K gaming support, and ray tracing capabilities.",
+    "price": 499.99,
+    "category": "Electronics",
+    "stock_status": "out_of_stock"
+  },
+  {
+    "product_id": "PROD010",
+    "name": "Xbox Series X",
+    "description": "Microsoft Xbox Series X with 1TB SSD, 4K gaming at 60fps, backward compatibility, and Xbox Game Pass support.",
+    "price": 499.99,
+    "category": "Electronics",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD011",
+    "name": "Nike Air Max 90",
+    "description": "Classic Nike Air Max 90 sneakers with visible Air cushioning, durable rubber outsole, and iconic design. Available in multiple colorways.",
+    "price": 120.00,
+    "category": "Clothing",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD012",
+    "name": "Adidas Ultraboost 23",
+    "description": "Premium running shoes with Boost midsole technology, Primeknit upper, and Continental rubber outsole. Designed for maximum comfort and performance.",
+    "price": 180.00,
+    "category": "Clothing",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD013",
+    "name": "Levi's 501 Original Jeans",
+    "description": "Classic straight-fit jeans with button fly, 100% cotton denim, and timeless design. Available in multiple washes and sizes.",
+    "price": 89.99,
+    "category": "Clothing",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD014",
+    "name": "Patagonia Better Sweater",
+    "description": "Fleece jacket made from recycled polyester, full-zip design, and classic fit. Perfect for outdoor activities and casual wear.",
+    "price": 99.00,
+    "category": "Clothing",
+    "stock_status": "low_stock"
+  },
+  {
+    "product_id": "PROD015",
+    "name": "The North Face Nuptse Jacket",
+    "description": "Iconic puffer jacket with 700-fill goose down, water-resistant shell, and adjustable hood. Available in multiple colors.",
+    "price": 250.00,
+    "category": "Clothing",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD016",
+    "name": "The Seven Husbands of Evelyn Hugo",
+    "description": "Bestselling novel by Taylor Jenkins Reid. A captivating story about a reclusive Hollywood icon and the journalist she chooses to tell her story.",
+    "price": 16.99,
+    "category": "Books",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD017",
+    "name": "Atomic Habits",
+    "description": "Self-help book by James Clear about building good habits and breaking bad ones. Practical strategies for making small changes that lead to remarkable results.",
+    "price": 18.99,
+    "category": "Books",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD018",
+    "name": "The Midnight Library",
+    "description": "Novel by Matt Haig about a library between life and death where you can try out different versions of your life. A thought-provoking and inspiring read.",
+    "price": 17.99,
+    "category": "Books",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD019",
+    "name": "Project Hail Mary",
+    "description": "Science fiction novel by Andy Weir. A lone astronaut must save the Earth from disaster. Full of humor, science, and adventure.",
+    "price": 19.99,
+    "category": "Books",
+    "stock_status": "low_stock"
+  },
+  {
+    "product_id": "PROD020",
+    "name": "Dune",
+    "description": "Epic science fiction novel by Frank Herbert. Set on the desert planet Arrakis, it's a complex tale of politics, religion, and ecology.",
+    "price": 18.99,
+    "category": "Books",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD021",
+    "name": "Dyson V15 Detect Vacuum",
+    "description": "Cordless vacuum cleaner with laser technology to reveal microscopic dust, HEPA filtration, and 60 minutes of runtime. Lightweight and powerful.",
+    "price": 749.99,
+    "category": "Home & Garden",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD022",
+    "name": "Instant Pot Duo 7-in-1",
+    "description": "Electric pressure cooker that works as a pressure cooker, slow cooker, rice cooker, steamer, sauté pan, yogurt maker, and warmer. 6-quart capacity.",
+    "price": 99.99,
+    "category": "Home & Garden",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD023",
+    "name": "Roomba j7+ Robot Vacuum",
+    "description": "Self-emptying robot vacuum with intelligent navigation, obstacle avoidance, and automatic dirt disposal. Works with Alexa and Google Assistant.",
+    "price": 599.99,
+    "category": "Home & Garden",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD024",
+    "name": "Nespresso Vertuo Coffee Maker",
+    "description": "Single-serve coffee maker with Centrifusion technology, makes espresso and coffee, includes milk frother. Compatible with Vertuo capsules.",
+    "price": 199.99,
+    "category": "Home & Garden",
+    "stock_status": "low_stock"
+  },
+  {
+    "product_id": "PROD025",
+    "name": "Philips Hue Starter Kit",
+    "description": "Smart lighting kit with 3 color bulbs, bridge, and app control. Works with Alexa, Google Assistant, and Apple HomeKit. Create custom scenes and schedules.",
+    "price": 199.99,
+    "category": "Home & Garden",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD026",
+    "name": "Peloton Bike",
+    "description": "Interactive exercise bike with 22-inch HD touchscreen, live and on-demand classes, and adjustable resistance. Includes 30-day home trial.",
+    "price": 1445.00,
+    "category": "Sports",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD027",
+    "name": "Yoga Mat Premium",
+    "description": "Extra-thick non-slip yoga mat with carrying strap. Made from eco-friendly TPE material, 6mm thickness for comfort and support.",
+    "price": 39.99,
+    "category": "Sports",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD028",
+    "name": "Garmin Forerunner 955",
+    "description": "Advanced GPS running watch with heart rate monitoring, training metrics, music storage, and up to 20 days battery life. Perfect for serious runners.",
+    "price": 599.99,
+    "category": "Sports",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD029",
+    "name": "Hydro Flask Water Bottle",
+    "description": "Insulated stainless steel water bottle keeps drinks cold for 24 hours or hot for 12 hours. 32oz capacity, leak-proof lid, and multiple color options.",
+    "price": 44.99,
+    "category": "Sports",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD030",
+    "name": "Adjustable Dumbbells Set",
+    "description": "Space-saving adjustable dumbbells from 5-50lbs each. Quick-change weight system, durable construction, and compact design for home gyms.",
+    "price": 299.99,
+    "category": "Sports",
+    "stock_status": "low_stock"
+  },
+  {
+    "product_id": "PROD031",
+    "name": "Canon EOS R6 Mark II",
+    "description": "Full-frame mirrorless camera with 24.2MP sensor, 4K video recording, in-body image stabilization, and advanced autofocus system.",
+    "price": 2499.99,
+    "category": "Electronics",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD032",
+    "name": "Sony A7 IV",
+    "description": "Professional mirrorless camera with 33MP full-frame sensor, 4K video, real-time eye autofocus, and 5-axis image stabilization.",
+    "price": 2498.00,
+    "category": "Electronics",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD033",
+    "name": "Kindle Paperwhite",
+    "description": "Waterproof e-reader with 6.8-inch glare-free display, adjustable warm light, and weeks of battery life. 8GB storage for thousands of books.",
+    "price": 139.99,
+    "category": "Electronics",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD034",
+    "name": "Apple Watch Series 9",
+    "description": "Latest Apple Watch with S9 chip, Always-On Retina display, advanced health features, and up to 18 hours battery life. GPS and cellular options.",
+    "price": 399.99,
+    "category": "Electronics",
+    "stock_status": "in_stock"
+  },
+  {
+    "product_id": "PROD035",
+    "name": "Fitbit Charge 6",
+    "description": "Advanced fitness tracker with heart rate monitoring, built-in GPS, sleep tracking, and 7-day battery life. Works with Google services.",
+    "price": 159.99,
+    "category": "Sports",
+    "stock_status": "in_stock"
+  }
+]
+
