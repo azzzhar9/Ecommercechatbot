@@ -29,8 +29,8 @@ class HybridSearch:
     
     # Synonyms for query expansion
     SYNONYMS = {
-        'laptop': ['laptop', 'macbook', 'dell', 'notebook', 'xps', 'portable', 'ultrabook'],
-        'phone': ['phone', 'iphone', 'samsung', 'galaxy', 'smartphone', 'mobile', 'cellphone'],
+        'laptop': ['laptop', 'macbook', 'macbooks', 'dell', 'notebook', 'xps', 'portable', 'ultrabook'],
+        'phone': ['phone', 'phones', 'iphone', 'samsung', 'galaxy', 'smartphone', 'mobile', 'cellphone'],
         'headphones': ['headphones', 'headphone', 'earbuds', 'airpods', 'earphones', 'headset', 'wh-1000', 'audio'],
         'watch': ['watch', 'smartwatch', 'apple watch', 'fitness', 'wearable'],
         'tablet': ['tablet', 'ipad', 'surface', 'tab'],
@@ -41,7 +41,7 @@ class HybridSearch:
         'camera': ['camera', 'canon', 'sony', 'dslr', 'mirrorless', 'photography'],
         'speaker': ['speaker', 'bluetooth speaker', 'sonos', 'bose', 'audio'],
         'tv': ['tv', 'television', 'smart tv', 'oled', '4k', 'display'],
-        'gaming': ['gaming', 'ps5', 'playstation', 'xbox', 'nintendo', 'console', 'controller'],
+        'gaming': ['gaming', 'ps5', 'playstation', 'xbox', 'nintendo', 'console', 'controller', 'accessories', 'accessory'],
         'cheap': ['cheap', 'budget', 'affordable', 'inexpensive', 'low cost'],
         'expensive': ['expensive', 'premium', 'high-end', 'flagship', 'pro', 'ultra'],
     }
@@ -149,9 +149,10 @@ class HybridSearch:
         query_lower = query.lower()
         
         # Check for explicit price mentions
-        price_match = re.search(r'under\s*\$?(\d+)', query_lower)
+        price_match = re.search(r'under\s*\$?\s*(\d+(?:\.\d+)?)', query_lower)
         if price_match:
-            return (0, float(price_match.group(1)))
+            max_price = float(price_match.group(1))
+            return (0.0, max_price)
         
         price_match = re.search(r'below\s*\$?(\d+)', query_lower)
         if price_match:
@@ -172,25 +173,129 @@ class HybridSearch:
         
         return None
     
-    def _extract_category(self, query: str) -> Optional[str]:
-        """Extract category filter from query."""
+    def _extract_categories(self, query: str) -> List[str]:
+        """Extract multiple categories from query with support for comma/and-separated lists. STRICT for price queries."""
         query_lower = query.lower()
-        
         categories = {
-            'electronics': ['electronics', 'electronic', 'tech', 'gadget'],
-            'audio': ['audio', 'sound', 'music', 'headphone', 'speaker', 'earbuds'],
-            'computers': ['computer', 'laptop', 'pc', 'desktop'],
-            'phones': ['phone', 'mobile', 'smartphone'],
-            'gaming': ['gaming', 'game', 'console', 'playstation', 'xbox'],
+            'phones': ['phone', 'phones', 'mobile', 'mobiles', 'smartphone', 'cellphone', 'iphone', 'iphones', 'samsung', 'galaxy'],
+            'computers': ['computer', 'laptop', 'laptops', 'pc', 'desktop', 'notebook', 'macbook', 'macbooks'],
+            'audio': ['audio', 'sound', 'music', 'headphone', 'speaker', 'earbuds', 'earbud'],
+            'gaming': ['gaming', 'game', 'console', 'playstation', 'xbox', 'nintendo', 'accessories', 'accessory'],
             'wearables': ['wearable', 'watch', 'fitness', 'tracker'],
+            'books': ['book', 'books', 'novel', 'novels', 'reading'],
+            'electronics': ['electronics', 'electronic', 'tech', 'gadget'],
         }
+        # Remove common words
+        query_clean = query_lower.strip()
+        for remove_word in ['show me', 'i want', 'show', 'give me', 'find', 'search for', 'looking for']:
+            query_clean = query_clean.replace(remove_word, '').strip()
+        segments = []
+        has_comma = ',' in query_clean
+        has_and = ' and ' in query_clean
+        if has_comma or has_and:
+            comma_parts = [part.strip() for part in query_clean.split(',')]
+            for part in comma_parts:
+                and_parts = [p.strip() for p in part.split(' and ')]
+                segments.extend(and_parts)
+        else:
+            segments = [query_clean]
+        segments = [s for s in segments if s and len(s) > 0]
+        found_categories = []
+        def is_explicit_book_segment(segment):
+            book_keywords = ['book', 'books', 'novel', 'novels', 'reading']
+            return any(bk in segment for bk in book_keywords)
+        # Check if price filter is present (for fallback logic)
+        price_filter_present = bool(re.search(r'(under|below|over|above|less than|more than|cheaper than|costing less than|costing more than|\$\d+)', query_clean))
+        for segment in segments:
+            segment = segment.strip()
+            if not segment:
+                continue
+            segment_normalized = segment.rstrip('s') if segment.endswith('s') and len(segment) > 3 else segment
+            words = segment.split()
+            segment_matched = False
+            for category, keywords in categories.items():
+                if category == 'books' and not is_explicit_book_segment(segment):
+                    continue
+                for keyword in keywords:
+                    if segment == keyword or segment_normalized == keyword:
+                        if category not in found_categories:
+                            found_categories.append(category)
+                        segment_matched = True
+                        break
+                    if len(segment) >= 4 and keyword.startswith(segment):
+                        if category not in found_categories:
+                            found_categories.append(category)
+                        segment_matched = True
+                        break
+                    if segment == keyword[:len(segment)] and len(segment) >= 3:
+                        if category == 'books' and not is_explicit_book_segment(segment):
+                            continue
+                        if category not in found_categories:
+                            found_categories.append(category)
+                        segment_matched = True
+                        break
+                if segment_matched:
+                    break
+            if not segment_matched:
+                for word in words:
+                    word = word.strip()
+                    if not word:
+                        continue
+                    word_normalized = word.rstrip('s') if word.endswith('s') and len(word) > 3 else word
+                    for category, keywords in categories.items():
+                        if category == 'books' and not is_explicit_book_segment(word):
+                            continue
+                        # Exact match
+                        if word in keywords or word_normalized in keywords:
+                            if category not in found_categories:
+                                found_categories.append(category)
+                            break
+                        # Check if any keyword contains the word (handles "accessories" matching "gaming accessories")
+                        for keyword in keywords:
+                            if word in keyword or keyword in word:
+                                if category == 'books' and not is_explicit_book_segment(word):
+                                    continue
+                                if category not in found_categories:
+                                    found_categories.append(category)
+                                break
+                        # Prefix match for longer words
+                        if len(word) >= 4:
+                            for keyword in keywords:
+                                if keyword.startswith(word):
+                                    if category == 'books' and not is_explicit_book_segment(word):
+                                        continue
+                                    if category not in found_categories:
+                                        found_categories.append(category)
+                                    break
+        # Fallback: if no categories found in segments, check whole query
+        # For price queries, still try to find categories but be more careful
+        if not found_categories:
+            for category, keywords in categories.items():
+                if category == 'books':
+                    # Only add books if explicit book keywords found
+                    if any(bk in query_lower for bk in ['book', 'books', 'novel', 'novels', 'reading']):
+                        if 'books' not in found_categories:
+                            found_categories.append('books')
+                    continue
+                for keyword in keywords:
+                    # Check if keyword appears as a standalone word (not part of another word)
+                    pattern = r'\b' + re.escape(keyword) + r'\b'
+                    if re.search(pattern, query_lower):
+                        if category not in found_categories:
+                            found_categories.append(category)
+                        break
+                    # Also check substring match for compound words like "gaming accessories"
+                    if keyword in query_lower:
+                        if category not in found_categories:
+                            found_categories.append(category)
+                        break
         
-        for category, keywords in categories.items():
-            for keyword in keywords:
-                if keyword in query_lower:
-                    return category
-        
-        return None
+        return found_categories if found_categories else []
+    
+    def _extract_category(self, query: str) -> Optional[str]:
+        """Extract single category (backward compatibility)."""
+        categories = self._extract_categories(query)
+        return categories[0] if categories else None
     
     def _bm25_score(self, query_terms: List[str], doc_idx: int) -> float:
         """Calculate BM25 score for a document."""
@@ -237,7 +342,7 @@ class HybridSearch:
         k: int = 5,
         sort_by: str = 'relevance',  # 'relevance', 'price_low', 'price_high'
         in_stock_only: bool = False
-    ) -> List[Dict]:
+    ):
         """
         Search products using hybrid BM25 + semantic matching.
         
@@ -248,7 +353,7 @@ class HybridSearch:
             in_stock_only: Filter to only in-stock products
         
         Returns:
-            List of matching products with scores
+            List[Dict] for single category, Dict[str, List[Dict]] for multiple categories
         """
         if not self.products:
             return []
@@ -258,17 +363,147 @@ class HybridSearch:
         
         # Extract filters
         price_filter = self._extract_price_filter(query)
+        categories = self._extract_categories(query)
         
+        # Decision point: Multiple categories vs Single category vs No category
+        # Multiple categories (explicit separators like comma, "and") -> return grouped dict
+        # Single category (no separators) -> return flat list
+        # No category -> search all products (with price filter if present)
+        if len(categories) > 1:
+            # Multi-category query: Search each category separately and return grouped results
+            grouped_results = {}
+            for category in categories:
+                category_results = self._search_by_category(query, category, price_filter, query_terms, k, sort_by, in_stock_only)
+                if category_results:
+                    grouped_results[category] = category_results
+            # Return dict only if we have results in multiple categories
+            if len(grouped_results) > 1:
+                return grouped_results
+            # If only one category has results, return as list for backward compatibility
+            elif len(grouped_results) == 1:
+                return list(grouped_results.values())[0]
+            else:
+                return []
+        
+        # Single category - filter by category and price
+        category_filter = categories[0] if categories else None
+        if category_filter:
+            return self._search_by_category(query, category_filter, price_filter, query_terms, k, sort_by, in_stock_only)
+        
+        # No category specified - search ALL products (with price filter if present)
         # Score all products
         scored_products = []
+        for idx, product in enumerate(self.products):
+            # Apply stock filter
+            if in_stock_only and product.get('stock_status') == 'out_of_stock':
+                continue
+            
+            # Apply price filter if present
+            if price_filter:
+                price = float(product.get('price', 0))
+                min_price, max_price = price_filter
+                if price < min_price or price > max_price:
+                    continue
+            
+            # Calculate relevance scores
+            bm25_score = self._bm25_score(query_terms, idx)
+            name_bonus = self._name_match_bonus(query_terms, product)
+            stock_bonus = self._stock_bonus(product)
+            total_score = bm25_score + name_bonus + stock_bonus
+            
+            if total_score > 0:
+                scored_products.append({
+                    'product': product,
+                    'score': total_score,
+                    'bm25_score': bm25_score,
+                    'name_bonus': name_bonus
+                })
+        
+        # Sort results
+        if sort_by == 'price_low':
+            scored_products.sort(key=lambda x: x['product'].get('price', float('inf')))
+        elif sort_by == 'price_high':
+            scored_products.sort(key=lambda x: x['product'].get('price', 0), reverse=True)
+        else:
+            scored_products.sort(key=lambda x: x['score'], reverse=True)
+        
+        return [item['product'] for item in scored_products[:k]]
+    
+    def _search_by_category(
+        self,
+        query: str,
+        category_filter: str,
+        price_filter: Optional[Tuple[float, float]],
+        query_terms: List[str],
+        k: int,
+        sort_by: str,
+        in_stock_only: bool
+    ) -> List[Dict]:
+        """Search products for a specific category."""
+        scored_products = []
+        
         for idx, product in enumerate(self.products):
             # Apply filters
             if in_stock_only and product.get('stock_status') == 'out_of_stock':
                 continue
             
+            # Category filter
+            product_category = product.get('category', '').lower()
+            product_name = product.get('name', '').lower()
+            product_desc = product.get('description', '').lower()
+            
+            category_match = False
+            if category_filter == 'phones':
+                phone_keywords = ['iphone', 'samsung', 'galaxy', 'smartphone', 'mobile phone', 'cell phone']
+                exclude_keywords = ['headphone', 'earbud', 'airpod', 'speaker']
+                is_excluded = any(kw in product_name or kw in product_desc for kw in exclude_keywords)
+                if not is_excluded:
+                    category_match = any(kw in product_name or kw in product_desc for kw in phone_keywords) or 'phone' in product_name
+            elif category_filter == 'electronics':
+                category_match = 'electronics' in product_category
+            elif category_filter == 'audio':
+                audio_keywords = ['headphone', 'earbud', 'speaker', 'airpod', 'audio', 'sound']
+                category_match = any(kw in product_name or kw in product_desc for kw in audio_keywords)
+            elif category_filter == 'computers':
+                computer_keywords = ['laptop', 'macbook', 'computer', 'pc', 'desktop', 'xps', 'notebook']
+                category_match = any(kw in product_name or kw in product_desc for kw in computer_keywords)
+            elif category_filter == 'gaming':
+                gaming_keywords = ['playstation', 'xbox', 'nintendo', 'console', 'controller', 'switch', 'ps5', 'gaming']
+                # Also check for "accessories" if query mentions gaming
+                category_match = any(kw in product_name or kw in product_desc for kw in gaming_keywords)
+                # Check for gaming accessories (accessories keyword with gaming context)
+                if 'accessories' in query.lower() or 'accessory' in query.lower():
+                    if 'accessories' in product_name.lower() or 'accessory' in product_name.lower():
+                        # Only match if it's actually gaming-related (console, controller, etc.)
+                        if any(gk in product_name or gk in product_desc for gk in ['console', 'controller', 'playstation', 'xbox', 'nintendo']):
+                            category_match = True
+                # Exclude laptops/computers that just mention gaming
+                if any(exclude in product_name or exclude in product_desc for exclude in ['laptop', 'macbook', 'computer', 'xps', 'dell']):
+                    category_match = False
+            elif category_filter == 'wearables':
+                wearable_keywords = ['watch', 'smartwatch', 'fitness', 'tracker', 'wearable']
+                category_match = any(kw in product_name or kw in product_desc for kw in wearable_keywords)
+            elif category_filter == 'books':
+                # Check category first
+                if 'book' in product_category.lower():
+                    category_match = True
+                else:
+                    # Check for book-related keywords but exclude "MacBook", "notebook" (computer)
+                    book_keywords = ['book', 'novel', 'reading']
+                    exclude_keywords = ['macbook', 'notebook', 'laptop']  # Exclude computer-related
+                    has_book_keyword = any(kw in product_name or kw in product_desc for kw in book_keywords)
+                    is_excluded = any(kw in product_name for kw in exclude_keywords)
+                    category_match = has_book_keyword and not is_excluded
+            
+            if not category_match:
+                continue
+            
+            # Price filter - apply STRICTLY (exclude products outside range)
             if price_filter:
-                price = product.get('price', 0)
-                if not (price_filter[0] <= price <= price_filter[1]):
+                price = float(product.get('price', 0))
+                min_price, max_price = price_filter
+                # Exclude if price is below minimum OR above maximum
+                if price < min_price or price > max_price:
                     continue
             
             # Calculate scores
@@ -291,10 +526,9 @@ class HybridSearch:
             scored_products.sort(key=lambda x: x['product'].get('price', float('inf')))
         elif sort_by == 'price_high':
             scored_products.sort(key=lambda x: x['product'].get('price', 0), reverse=True)
-        else:  # relevance
+        else:
             scored_products.sort(key=lambda x: x['score'], reverse=True)
         
-        # Return top k products
         return [item['product'] for item in scored_products[:k]]
     
     def get_recommendations(

@@ -101,6 +101,81 @@ class EcommerceChatbot:
         sanitized = re.sub(r'[<>"\';\\]', '', text)
         return sanitized.strip()
     
+    def _resolve_product_name(self, product_name: str) -> Optional[Dict]:
+        """
+        Resolve partial/plural product names to exact product names.
+        
+        Args:
+            product_name: Partial or plural product name (e.g., "MacBooks", "iPhone")
+        
+        Returns:
+            Product dict with exact name and price, or None if not found
+        """
+        import json
+        from pathlib import Path
+        
+        try:
+            products_file = Path("./data/products.json")
+            if not products_file.exists():
+                return None
+            
+            with open(products_file, 'r', encoding='utf-8') as f:
+                all_products = json.load(f)
+            
+            product_name_lower = product_name.lower().strip()
+            
+            # Normalize: remove trailing 's' for plurals
+            if product_name_lower.endswith('s') and len(product_name_lower) > 3:
+                product_name_normalized = product_name_lower[:-1]
+            else:
+                product_name_normalized = product_name_lower
+            
+            # Try exact match first
+            for product in all_products:
+                if product_name_lower in product.get('name', '').lower():
+                    return product
+            
+            # Try normalized match (plural handling)
+            for product in all_products:
+                product_name_db = product.get('name', '').lower()
+                if product_name_normalized in product_name_db or product_name_db.startswith(product_name_normalized):
+                    return product
+            
+            # Try fuzzy match - check if any word matches or if query is substring
+            # This handles cases like "iPhone" -> "iPhone 15 Pro"
+            query_words = set(product_name_normalized.split())
+            best_match = None
+            best_score = 0
+            
+            for product in all_products:
+                product_name_db = product.get('name', '').lower()
+                
+                # Check if normalized query is a prefix or substring of product name
+                # This handles "iPhone" matching "iPhone 15 Pro"
+                if product_name_normalized in product_name_db:
+                    # Prefer matches where query is at the start (better match)
+                    if product_name_db.startswith(product_name_normalized):
+                        return product  # Best match - return immediately
+                    # Otherwise, track as potential match
+                    if best_match is None or len(product_name_db) < len(best_match.get('name', '').lower()):
+                        best_match = product
+                        best_score = 1.0
+                        continue
+                
+                product_words = set(product_name_db.split())
+                
+                # Count matching words
+                matches = len(query_words.intersection(product_words))
+                if matches > best_score:
+                    best_score = matches
+                    best_match = product
+            
+            return best_match if best_score > 0 else None
+            
+        except Exception as e:
+            logger.error(f"Error resolving product name: {str(e)}")
+            return None
+    
     def get_function_tools(self) -> List[Dict]:
         """
         Define function tools for OpenAI Function Calling.
@@ -208,17 +283,17 @@ class EcommerceChatbot:
                 "type": "function",
                 "function": {
                     "name": "checkout",
-                    "description": "Checkout and place an order for all items in the cart. Use when user says 'checkout', 'place order', 'buy now', 'complete order'.",
+                    "description": "Checkout and place an order for all items in the cart. Use when user says 'checkout', 'place order', 'buy now', 'complete order'. Customer name and email are optional - if not provided, defaults will be used. User can provide them in the query like 'checkout with name John and email john@example.com'.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "customer_name": {
                                 "type": "string",
-                                "description": "Customer name (optional)"
+                                "description": "Customer name (optional - will use default if not provided)"
                             },
                             "customer_email": {
                                 "type": "string",
-                                "description": "Customer email address (optional)"
+                                "description": "Customer email address (optional - will use default if not provided)"
                             }
                         },
                         "required": []
@@ -276,6 +351,30 @@ class EcommerceChatbot:
                         "required": ["product_name", "quantity", "unit_price"]
                     }
                 }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_stock_info",
+                    "description": "Get stock information for all products. Use when user asks for stock details, stock info, inventory, or wants to see all products with their stock status.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": []
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_categories",
+                    "description": "List all available product categories. Use when user asks for categories, wants to see all categories, or asks what categories are available.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": []
+                    }
+                }
             }
         ]
     
@@ -296,31 +395,129 @@ class EcommerceChatbot:
                 sort_by = arguments.get("sort_by", "relevance")
                 products = self.rag_agent.search_products(query, k=5, sort_by=sort_by)
                 
-                if products:
-                    # Update last product and browsed products
-                    self.last_product = products[0]['name']
-                    self.browsed_products.extend(products[:3])  # Remember top 3
-                
-                # Format results
-                result_text = "\n\n".join([
-                    f"Product: {p['name']}\n"
-                    f"Price: ${p['price']:.2f}\n"
-                    f"Description: {p['description'][:200]}...\n"
-                    f"Stock: {p['stock_status']}\n"
-                    f"Category: {p['category']}"
-                    for p in products
-                ])
-                
+                # Check if results are grouped by category (dict) or flat list
+                if isinstance(products, dict):
+                    # Multi-category results - format with category headers
+                    result_text = "I found products in multiple categories:\n\n"
+                    all_products = []
+                    # Category display names
+                    category_names = {
+                        'computers': '💻 Laptops & Computers',
+                        'phones': '📱 Phones',
+                        'books': '📚 Books',
+                        'audio': '🎧 Audio & Headphones',
+                        'gaming': '🎮 Gaming',
+                        'wearables': '⌚ Wearables',
+                        'electronics': '⚡ Electronics'
+                    }
+                    for category, category_products in products.items():
+                        if category_products:
+                            display_name = category_names.get(category, category.title())
+                            result_text += f"**{display_name}:**\n"
+                            for i, p in enumerate(category_products, 1):
+                                stock_msg = "in stock" if p['stock_status'] == "in_stock" else f"{p['stock_status']}"
+                                result_text += f"  {i}. {p['name']} - ${p['price']:.2f} ({stock_msg})\n"
+                            result_text += "\n"
+                            all_products.extend(category_products)
+                            if not self.last_product and category_products:
+                                self.last_product = category_products[0]['name']
+                            self.browsed_products.extend(category_products[:2])
+                    if not all_products:
+                        return {
+                            "success": False,
+                            "result": "No products found matching your search. Please try different keywords or filters.",
+                            "products": [],
+                            "query": query
+                        }
+                    return {
+                        "success": True,
+                        "result": result_text,
+                        "products": all_products,
+                        "grouped_by_category": True,
+                        "query": query
+                    }
+                # Single category or no category - existing logic
+                if not products:
+                    return {
+                        "success": False,
+                        "result": "No products found matching your search. Please try different keywords or filters.",
+                        "products": [],
+                        "query": query
+                    }
+                # Only use filtered products, no fallback
+                self.last_product = products[0]['name']
+                self.browsed_products.extend(products[:3])
+                if len(products) == 1:
+                    p = products[0]
+                    stock_msg = "in stock" if p['stock_status'] == "in_stock" else f"{p['stock_status']}"
+                    result_text = (
+                        f"The {p['name']} is priced at ${p['price']:.2f} and is currently {stock_msg}.\n"
+                        f"{p['description'][:200]}..."
+                    )
+                else:
+                    result_text = f"I found {len(products)} product(s) matching your search:\n\n"
+                    for i, p in enumerate(products, 1):
+                        stock_msg = "in stock" if p['stock_status'] == "in_stock" else f"{p['stock_status']}"
+                        result_text += f"{i}. **{p['name']}** - ${p['price']:.2f} ({stock_msg})\n"
+                        result_text += f"   {p['description'][:100]}...\n\n"
                 return {
                     "success": True,
-                    "result": f"Found {len(products)} product(s):\n\n{result_text}" if products else "No products found.",
-                    "products": products
+                    "result": result_text,
+                    "products": products,
+                    "query": query
                 }
             
             elif function_name == "add_to_cart":
                 product_name = arguments.get("product_name", "")
                 quantity = arguments.get("quantity", 1)
                 unit_price = arguments.get("unit_price", 0.0)
+                
+                # Resolve product name if unit_price is 0 or product_name is partial/plural
+                # PRIORITY: Try to resolve provided product_name first, only use last_product as fallback
+                if unit_price == 0.0 or not product_name:
+                    # First, try to resolve the provided product_name
+                    if product_name:
+                        resolved = self._resolve_product_name(product_name)
+                        if resolved:
+                            product_name = resolved['name']
+                            unit_price = resolved['price']
+                    
+                    # Only use last_product if product_name resolution failed
+                    if (unit_price == 0.0 or not product_name) and self.last_product:
+                        resolved = self._resolve_product_name(self.last_product)
+                        if resolved:
+                            product_name = resolved['name']
+                            unit_price = resolved['price']
+                
+                # If still no price, try to find product using search
+                if unit_price == 0.0 and product_name:
+                    # First try direct resolution
+                    resolved = self._resolve_product_name(product_name)
+                    if resolved:
+                        product_name = resolved['name']
+                        unit_price = resolved['price']
+                    else:
+                        # Fallback: search for products matching the name
+                        search_results = self.rag_agent.search_products(product_name, k=1)
+                        if search_results:
+                            # Handle both list and dict results
+                            if isinstance(search_results, dict):
+                                # Get first product from first category
+                                for category_products in search_results.values():
+                                    if category_products:
+                                        product_name = category_products[0]['name']
+                                        unit_price = category_products[0]['price']
+                                        break
+                            elif isinstance(search_results, list) and len(search_results) > 0:
+                                product_name = search_results[0]['name']
+                                unit_price = search_results[0]['price']
+                
+                if not product_name or unit_price == 0.0:
+                    original_name = arguments.get("product_name", product_name or "that product")
+                    return {
+                        "success": False,
+                        "result": f"I couldn't find the product '{original_name}'. Please try searching for it first, or specify the exact product name."
+                    }
                 
                 self.cart.add_item(
                     product_id=product_name.lower().replace(" ", "_"),
@@ -377,27 +574,38 @@ class EcommerceChatbot:
                 customer_name = arguments.get("customer_name")
                 customer_email = arguments.get("customer_email")
                 
-                if customer_name:
-                    self.cart.customer_name = customer_name
-                if customer_email:
-                    self.cart.customer_email = customer_email
+                # Use defaults if not provided (for testing/demo purposes)
+                if not customer_name:
+                    customer_name = "Guest Customer"
+                if not customer_email:
+                    customer_email = "guest@example.com"
+                
+                # Set cart customer info
+                self.cart.customer_name = customer_name
+                self.cart.customer_email = customer_email
                 
                 # Create orders for each item
                 order_ids = []
+                errors = []
                 for item in self.cart.items:
                     order_data = {
                         "product_name": item.product_name,
                         "quantity": item.quantity,
+                        "unit_price": item.unit_price,  # Include unit_price from cart
                         "customer_name": self.cart.customer_name,
                         "customer_email": self.cart.customer_email
                     }
-                    success, message, order_id = self.order_agent.process_order(order_data)
+                    # Use process_order_without_confirmation for checkout (skip interactive confirmation)
+                    success, message, order_id = self.order_agent.process_order_without_confirmation(order_data)
                     if success:
                         order_ids.append(order_id)
                         self.order_count += 1
+                    else:
+                        errors.append(f"{item.product_name}: {message}")
                 
                 # Generate receipt
-                receipt = f"""
+                if order_ids:
+                    receipt = f"""
 ✅ **Order Confirmed!**
 
 {self.cart.get_summary()}
@@ -406,27 +614,54 @@ Order ID(s): {', '.join(order_ids)}
 
 Thank you for your purchase! 🎉
 """
-                
-                # Clear cart after checkout
-                self.cart.clear()
-                
-                return {
-                    "success": True,
-                    "result": receipt,
-                    "order_ids": order_ids
-                }
+                    # Clear cart after successful checkout
+                    self.cart.clear()
+                    
+                    return {
+                        "success": True,
+                        "result": receipt,
+                        "order_ids": order_ids
+                    }
+                else:
+                    # Some or all orders failed
+                    error_msg = "Failed to process checkout. "
+                    if errors:
+                        error_msg += "Errors: " + "; ".join(errors)
+                    else:
+                        error_msg += "No items could be processed."
+                    
+                    return {
+                        "success": False,
+                        "result": error_msg
+                    }
             
             elif function_name == "get_recommendations":
                 product_name = arguments.get("product_name", "")
-                if not product_name and self.last_product:
-                    product_name = self.last_product
+                
+                # Use last product if not provided
+                if not product_name:
+                    if self.last_product:
+                        product_name = self.last_product
+                    elif self.browsed_products:
+                        # Use most recently browsed product
+                        product_name = self.browsed_products[-1].get('name', '')
+                    else:
+                        return {
+                            "success": False,
+                            "result": "I don't have a product to base recommendations on. Please search for a product first, or specify which product you'd like recommendations for."
+                        }
+                
+                # Resolve product name if partial
+                resolved = self._resolve_product_name(product_name)
+                if resolved:
+                    product_name = resolved['name']
                 
                 recommendations = self.rag_agent.get_recommendations(product_name, k=3)
                 
                 if recommendations:
-                    result_text = "Based on your interest, you might also like:\n\n"
+                    result_text = f"Based on {product_name}, you might also like:\n\n"
                     for p in recommendations:
-                        result_text += f"• **{p['name']}** - ${p['price']:.2f}\n"
+                        result_text += f"• **{p['name']}** - ${p['price']:.2f} ({p.get('category', 'N/A')})\n"
                     return {
                         "success": True,
                         "result": result_text,
@@ -434,8 +669,138 @@ Thank you for your purchase! 🎉
                     }
                 return {
                     "success": False,
-                    "result": "No recommendations available."
+                    "result": f"No recommendations available for {product_name}."
                 }
+            
+            elif function_name == "get_stock_info":
+                # Get all products with stock information
+                import json
+                from pathlib import Path
+                
+                try:
+                    products_file = Path("./data/products.json")
+                    if not products_file.exists():
+                        return {
+                            "success": False,
+                            "result": "Product database not found."
+                        }
+                    
+                    with open(products_file, 'r', encoding='utf-8') as f:
+                        all_products = json.load(f)
+                    
+                    # Group by category
+                    categories = {}
+                    for product in all_products:
+                        category = product.get('category', 'Uncategorized')
+                        if category not in categories:
+                            categories[category] = []
+                        categories[category].append(product)
+                    
+                    # Format stock information
+                    result_text = "**Stock Information for All Products:**\n\n"
+                    
+                    for category, products in sorted(categories.items()):
+                        result_text += f"**{category}:**\n"
+                        for product in products:
+                            name = product.get('name', 'N/A')
+                            price = product.get('price', 0)
+                            stock_status = product.get('stock_status', 'unknown')
+                            
+                            # Format stock status
+                            if stock_status == 'in_stock':
+                                stock_display = "✅ In Stock"
+                            elif stock_status == 'low_stock':
+                                stock_display = "⚠️ Low Stock"
+                            elif stock_status == 'out_of_stock':
+                                stock_display = "❌ Out of Stock"
+                            else:
+                                stock_display = f"❓ {stock_status}"
+                            
+                            result_text += f"  • {name} - ${price:.2f} - {stock_display}\n"
+                        result_text += "\n"
+                    
+                    result_text += f"\n**Total Products:** {len(all_products)}"
+                    result_text += f"\n**Total Categories:** {len(categories)}"
+                    
+                    return {
+                        "success": True,
+                        "result": result_text,
+                        "products": all_products,
+                        "categories": list(categories.keys())
+                    }
+                    
+                except Exception as e:
+                    logger.error(f"Error getting stock info: {str(e)}", exc_info=True)
+                    return {
+                        "success": False,
+                        "result": f"Error retrieving stock information: {str(e)}"
+                    }
+            
+            elif function_name == "list_categories":
+                # List all available categories
+                import json
+                from pathlib import Path
+                
+                try:
+                    products_file = Path("./data/products.json")
+                    if not products_file.exists():
+                        return {
+                            "success": False,
+                            "result": "Product database not found."
+                        }
+                    
+                    with open(products_file, 'r', encoding='utf-8') as f:
+                        all_products = json.load(f)
+                    
+                    # Get unique categories
+                    categories = set()
+                    category_counts = {}
+                    for product in all_products:
+                        category = product.get('category', 'Uncategorized')
+                        categories.add(category)
+                        category_counts[category] = category_counts.get(category, 0) + 1
+                    
+                    # Format category list
+                    result_text = "**Available Product Categories:**\n\n"
+                    
+                    # Category display mapping
+                    category_display = {
+                        'Electronics': '⚡ Electronics',
+                        'Clothing': '👕 Clothing',
+                        'Books': '📚 Books',
+                        'Home & Kitchen': '🏠 Home & Kitchen',
+                        'Sports & Outdoors': '⚽ Sports & Outdoors',
+                        'Toys & Games': '🎮 Toys & Games',
+                        'Beauty & Personal Care': '💄 Beauty & Personal Care',
+                        'Health & Household': '💊 Health & Household'
+                    }
+                    
+                    for category in sorted(categories):
+                        display_name = category_display.get(category, category)
+                        count = category_counts[category]
+                        result_text += f"  • {display_name} ({count} product{'s' if count != 1 else ''})\n"
+                    
+                    result_text += f"\n**Total Categories:** {len(categories)}"
+                    result_text += f"\n**Total Products:** {len(all_products)}"
+                    
+                    # Also provide category keywords for search
+                    result_text += "\n\n**You can search by category keywords like:**"
+                    result_text += "\n  • Laptops, Phones, Headphones, Gaming, Books, etc."
+                    result_text += "\n  • Or ask me to 'show me [category]' to browse products"
+                    
+                    return {
+                        "success": True,
+                        "result": result_text,
+                        "categories": sorted(list(categories)),
+                        "category_counts": category_counts
+                    }
+                    
+                except Exception as e:
+                    logger.error(f"Error listing categories: {str(e)}", exc_info=True)
+                    return {
+                        "success": False,
+                        "result": f"Error retrieving categories: {str(e)}"
+                    }
             
             elif function_name == "create_order":
                 # Extract order details
@@ -503,6 +868,7 @@ Thank you for your purchase! 🎉
         Returns:
             Bot's response
         """
+        logger.debug(f"[DEBUG] handle_message called with user_input: {user_input}")
         # Create trace for this conversation turn
         trace = self.tracer.trace(
             name="handle_message",
@@ -582,6 +948,7 @@ Always use exact prices from search results."""
                     logger.info("API call completed successfully")
                     
                     message = response.choices[0].message
+                    bot_response = None  # Initialize early to prevent UnboundLocalError
                     
                     # Check for function calls
                     if message.tool_calls:
@@ -624,47 +991,244 @@ Always use exact prices from search results."""
                         bot_response = None
                         if function_results:
                             result = function_results[0]
-                            if result.get("success") and result.get("products"):
-                                products = result["products"]
-                                if products:
-                                    product = products[0]
-                                    # Create a natural, conversational response
-                                    stock_msg = "in stock" if product['stock_status'] == "in_stock" else f"has {product['stock_status']}"
-                                    bot_response = (
-                                        f"The {product['name']} is priced at ${product['price']:.2f} "
-                                        f"and is currently {stock_msg}. "
-                                    )
-                                    # Add description if available
-                                    if product.get('description'):
-                                        desc = product['description'][:150].replace('\n', ' ')
-                                        bot_response += f"{desc}..."
+                            logger.info(f"Processing function result: success={result.get('success')}, keys={list(result.keys())}")
+                            # Priority: Use formatted result if available (handles multi-category, cart, etc.)
+                            if result.get("success"):
+                                # Check for grouped results first
+                                if result.get("grouped_by_category") and result.get("result"):
+                                    bot_response = result.get("result")
+                                # Then check for regular result (cart operations, order operations, etc.)
+                                elif result.get("result"):
+                                    bot_response = result.get("result")
+                                # Check for cart operations (they return result field)
+                                elif result.get("cart"):
+                                    # Cart operations return result in "result" field
+                                    bot_response = result.get("result", "Cart operation completed.")
+                                # Check for order operations
+                                elif result.get("order_id"):
+                                    bot_response = result.get("result", "Your order has been processed.")
+                                # Fallback to products if no formatted result
+                                elif result.get("products"):
+                                    products = result["products"]
+                                    if products:
+                                        if len(products) == 1:
+                                            product = products[0]
+                                            stock_msg = "in stock" if product['stock_status'] == "in_stock" else f"{product['stock_status']}"
+                                            bot_response = (
+                                                f"The {product['name']} is priced at ${product['price']:.2f} "
+                                                f"and is currently {stock_msg}."
+                                            )
+                                        else:
+                                            response_parts = [f"I found {len(products)} product(s):\n\n"]
+                                            for i, product in enumerate(products[:5], 1):
+                                                stock_msg = "in stock" if product['stock_status'] == "in_stock" else f"{product['stock_status']}"
+                                                response_parts.append(
+                                                    f"{i}. {product['name']} - ${product['price']:.2f} ({stock_msg})\n"
+                                                )
+                                            bot_response = "".join(response_parts)
+                                    else:
+                                        # Check if this was a filtered search (category + price)
+                                        # Get query from result metadata if available
+                                        query_text = result.get("query", "")
+                                        
+                                        # Check for category and price filter in query
+                                        has_category = False
+                                        has_price_filter = False
+                                        category_name = "products"
+                                        price_part = ""
+                                        
+                                        if query_text:
+                                            query_lower = query_text.lower()
+                                            # Check for categories
+                                            if 'laptop' in query_lower:
+                                                category_name = "laptops"
+                                                has_category = True
+                                            elif 'phone' in query_lower or 'iphone' in query_lower or 'samsung' in query_lower:
+                                                category_name = "phones"
+                                                has_category = True
+                                            elif 'book' in query_lower and 'notebook' not in query_lower and 'macbook' not in query_lower:
+                                                category_name = "books"
+                                                has_category = True
+                                            elif 'headphone' in query_lower or 'earbud' in query_lower:
+                                                category_name = "headphones"
+                                                has_category = True
+                                            elif 'gaming' in query_lower or 'console' in query_lower:
+                                                category_name = "gaming products"
+                                                has_category = True
+                                            
+                                            # Check for price filter
+                                            import re
+                                            price_match = re.search(r'under\s*\$?\s*(\d+(?:\.\d+)?)', query_lower)
+                                            if price_match:
+                                                has_price_filter = True
+                                                price_part = f" under ${price_match.group(1)}"
+                                            else:
+                                                price_match = re.search(r'below\s*\$?\s*(\d+(?:\.\d+)?)', query_lower)
+                                                if price_match:
+                                                    has_price_filter = True
+                                                    price_part = f" below ${price_match.group(1)}"
+                                        
+                                        # Provide specific error message if category and price filter detected
+                                        if has_category and has_price_filter:
+                                            bot_response = f"No {category_name} found{price_part}. Please try different filters or browse all {category_name}."
+                                        elif has_category:
+                                            bot_response = f"No {category_name} found. Please try different keywords or browse all {category_name}."
+                                        else:
+                                            bot_response = "I couldn't find that product. Could you try rephrasing your search?"
                                 else:
-                                    bot_response = "I couldn't find that product. Could you try rephrasing your search?"
-                            elif result.get("success") and result.get("order_id"):
-                                # Order was created
-                                bot_response = result.get("result", "Your order has been processed.")
+                                    # Final fallback - check if there's any result field
+                                    bot_response = result.get("result", "I processed your request.")
                             else:
-                                bot_response = result.get("result", "I processed your request.")
+                                # Function returned failure - use error message
+                                bot_response = result.get("result", "I couldn't process that request. Please try again.")
                         
-                        # If we have a response, use it (skip slow LLM call for faster response)
+                        # If we have a response from function results, use it (skip slow LLM call for faster response)
+                        # BUT: If multiple function calls were made (multi-category query), aggregate all results
+                        if bot_response and len(function_results) == 1:
+                            # Single result - use formatted response directly
+                            logger.info(f"Using formatted response from function results: {bot_response[:100]}...")
+                        elif function_results:
+                            # Multiple results or no response - aggregate all function results
+                            if bot_response and len(function_results) > 1:
+                                # Reset bot_response to trigger aggregation for multi-category queries
+                                bot_response = None
+                                logger.info(f"Multiple function calls detected ({len(function_results)}), aggregating all results...")
+                            # Fallback: Aggregate all function results for multi-intent queries
+                            # Deduplicate category headers and product listings before formatting
+                            from collections import defaultdict, OrderedDict
+                            category_to_products = OrderedDict()
+                            product_ids_seen = set()
+                            for idx, result in enumerate(function_results):
+                                if not result.get("success"):
+                                    continue
+                                # If grouped by category, parse the result string to extract products (skip for now)
+                                if result.get("grouped_by_category") and result.get("products"):
+                                    # Add products to deduplication logic
+                                    for p in result["products"]:
+                                        pid = p.get("product_id")
+                                        if pid in product_ids_seen:
+                                            continue
+                                        label = p.get("category_label") or p.get("category") or "Other"
+                                        if label not in category_to_products:
+                                            category_to_products[label] = []
+                                        category_to_products[label].append(p)
+                                        product_ids_seen.add(pid)
+                                    continue
+                                # If single/multi product result, group by refined category and label each group
+                                elif result.get("products") is not None:
+                                    products = result["products"]
+                                    if isinstance(products, list) and len(products) > 0:
+                                        # Refined category mapping by product name/description, with improved phone logic and deduplication across all groups
+                                        refined_category_map = [
+                                            ("💻 Laptops", ["laptop", "macbook", "notebook", "xps", "dell"], ["notebook"], []),
+                                            ("📱 Phones", ["phone", "iphone", "samsung", "galaxy", "smartphone", "mobile", "cellphone"], ["headphone", "earbud", "airpod", "speaker", "audio", "book", "novel", "reading"], []),
+                                            ("🎧 Audio & Headphones", ["headphone", "earbud", "airpod", "audio", "sound", "speaker"], ["phone", "mobile", "cellphone", "book", "novel", "reading"], []),
+                                            ("⌚ Wearables", ["watch", "smartwatch", "fitness", "tracker", "wearable"], [], []),
+                                            ("🎮 Gaming", ["playstation", "xbox", "nintendo", "console", "controller", "switch", "ps5", "gaming"], ["laptop", "macbook", "computer", "xps", "dell", "book", "novel", "reading"], []),
+                                            ("📚 Books", ["book", "novel", "reading"], ["macbook", "notebook", "laptop", "phone", "mobile", "cellphone"], []),
+                                            ("⚡ Electronics", ["electronics", "ipad", "tablet", "display", "monitor", "tv"], [], [])
+                                        ]
+                                        for p in products:
+                                            pid = p.get("product_id")
+                                            if pid in product_ids_seen:
+                                                continue
+                                            pname = p.get("name", "").lower()
+                                            pdesc = p.get("description", "").lower()
+                                            assigned = False
+                                            for label, keywords, exclude_keywords, must_not_have in refined_category_map:
+                                                if any(ex_kw in pname or ex_kw in pdesc for ex_kw in exclude_keywords):
+                                                    continue
+                                                if must_not_have and any(mnh in pname or mnh in pdesc for mnh in must_not_have):
+                                                    continue
+                                                if any(kw in pname or kw in pdesc for kw in keywords):
+                                                    if label not in category_to_products:
+                                                        category_to_products[label] = []
+                                                    category_to_products[label].append(p)
+                                                    assigned = True
+                                                    break
+                                            if not assigned:
+                                                if "⚡ Electronics" not in category_to_products:
+                                                    category_to_products["⚡ Electronics"] = []
+                                                category_to_products["⚡ Electronics"].append(p)
+                                            product_ids_seen.add(pid)
+                                else:
+                                    # Check for non-product results (cart, orders, etc.)
+                                    if result.get("result") and not result.get("products"):
+                                        # This is a cart/order operation - store it for later
+                                        if not hasattr(self, '_non_product_results'):
+                                            self._non_product_results = []
+                                        self._non_product_results.append(result.get("result"))
+                                    continue
+                            
+                            # Now format the deduplicated response
+                            bot_response_parts = []
+                            
+                            # Add non-product results first (cart operations, orders, etc.)
+                            if hasattr(self, '_non_product_results') and self._non_product_results:
+                                bot_response_parts.extend(self._non_product_results)
+                                delattr(self, '_non_product_results')
+                            
+                            # Add product results
+                            for label, group_products in category_to_products.items():
+                                if not group_products:
+                                    continue
+                                if len(group_products) == 1:
+                                    product = group_products[0]
+                                    stock_msg = "in stock" if product['stock_status'] == "in_stock" else f"{product['stock_status']}"
+                                    header = f"**{label}:**\n"
+                                    bot_response_parts.append(
+                                        f"{header}The {product['name']} is priced at ${product['price']:.2f} and is currently {stock_msg}."
+                                    )
+                                else:
+                                    header = f"**{label}:**\n"
+                                    response_parts = [header + f"I found {len(group_products)} product(s):\n\n"]
+                                    for i, product in enumerate(group_products[:5], 1):
+                                        stock_msg = "in stock" if product['stock_status'] == "in_stock" else f"{product['stock_status']}"
+                                        response_parts.append(
+                                            f"{i}. {product['name']} - ${product['price']:.2f} ({stock_msg})\n"
+                                        )
+                                    bot_response_parts.append("".join(response_parts))
+                            
+                            bot_response = "\n\n".join(bot_response_parts) if bot_response_parts else None
+                            
+                            if not bot_response:
+                                logger.warning("No response from function results aggregation")
+                        
+                        # If we still don't have a response, try LLM call
                         if not bot_response:
-                            # Fallback if somehow bot_response is None
-                            bot_response = "I processed your request, but couldn't generate a response. Please try again."
-                            logger.warning("bot_response was None, using fallback")
+                            try:
+                                logger.info("Making API call to generate response...")
+                                response = client.chat.completions.create(
+                                    model=os.getenv("OPENAI_MODEL", "openai/gpt-4o-mini"),
+                                    messages=self.chat_history,
+                                    temperature=0.7,
+                                    timeout=30.0
+                                )
+                                message = response.choices[0].message
+                                bot_response = message.content
+                                logger.info("LLM response generated successfully")
+                            except Exception as e:
+                                logger.error(f"Failed to generate LLM response: {str(e)}")
+                                bot_response = "I processed your request, but couldn't generate a response. Please try again."
+                        
+                        # Final fallback
+                        if not bot_response:
+                            bot_response = "I'm sorry, I couldn't process that request. Please try again."
+                            logger.warning("bot_response was None, using final fallback")
                     else:
-                        bot_response = message.content
+                        # No tool calls - use message content directly
+                        if message.content:
+                            bot_response = message.content
+                        else:
+                            bot_response = "I received your message but couldn't generate a response."
                     
-                    # Ensure we have a response
+                    # Ensure bot_response is always set before using it
                     if not bot_response:
                         bot_response = "I'm sorry, I couldn't process that request. Please try again."
                     
-                    # Add to chat history
                     self.chat_history.append({"role": "assistant", "content": bot_response})
-                    
-                    # End trace with success
                     trace.end(output={"response": bot_response[:200], "success": True})
                     self.tracer.flush()
-                    
                     logger.info(f"Returning response to user: {bot_response[:100] if len(bot_response) > 100 else bot_response}")
                     return bot_response
                     

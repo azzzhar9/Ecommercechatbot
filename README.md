@@ -166,10 +166,21 @@ Then open **http://localhost:8501** in your browser.
 | "expensive headphones" | Premium product search |
 | "gaming accessories" | Category search |
 
+#### Multi-Category Queries
+
+| Query | Description |
+|-------|-------------|
+| "show me laptop, mobile and books" | Returns grouped results by category |
+| "laptop,book" | Returns both categories separately |
+| "phones and books" | Multi-category search with "and" separator |
+
+**Note:** Multi-category queries require explicit separators (comma or "and"). Queries without separators are treated as single-category searches.
+
 #### Shopping Cart
 | Query | Description |
 |-------|-------------|
 | "Add iPhone 15 Pro to my cart" | Add single item |
+| "Add iPhone to my cart" | Partial name resolution (matches "iPhone 15 Pro") |
 | "Add 2 MacBooks to cart" | Add multiple quantity |
 | "What's in my cart?" | View cart contents |
 | "Remove iPhone from cart" | Remove item |
@@ -313,6 +324,76 @@ for order in orders:
     print(f"Order {order['order_id']}: {order['product_name']} x{order['quantity']} = ${order['total_price']}")
 ```
 
+## Query Handling
+
+### Single vs Multi-Category Queries
+
+The system intelligently handles two types of product queries:
+
+**Single Category Queries:**
+- Examples: "show me laptops", "phones under $1000", "cheap books"
+- **Behavior**: Returns a flat list of products
+- **Detection**: No explicit separators (comma or "and") in the query
+- **Result Format**: `List[Dict]` - Simple list of matching products
+
+**Multi-Category Queries:**
+- Examples: "laptop,book", "show me laptop, mobile and books", "phones and books"
+- **Behavior**: Returns grouped results by category
+- **Detection**: Contains explicit separators (comma `,` or word "and")
+- **Result Format**: `Dict[str, List[Dict]]` - Dictionary with category keys
+
+**Category Extraction Logic:**
+- Only splits query into segments when explicit separators are detected
+- Prevents false multi-category detection for single queries
+- Supports comma-separated: "laptop,book"
+- Supports "and"-separated: "laptop and mobile"
+- Supports mixed: "laptop, mobile and books"
+
+**Example Response Formats:**
+
+Single Category:
+```
+I found 5 product(s) matching your search:
+
+1. MacBook Pro 14-inch - $1999.99 (in stock)
+2. Dell XPS 15 - $1799.99 (in stock)
+...
+```
+
+Multi-Category:
+```
+I found products in multiple categories:
+
+💻 Laptops & Computers:
+  1. MacBook Pro 14-inch - $1999.99 (in stock)
+  2. Dell XPS 15 - $1799.99 (in stock)
+
+📱 Phones:
+  1. iPhone 15 Pro - $999.99 (in stock)
+  2. Samsung Galaxy S24 Ultra - $1199.99 (in stock)
+```
+
+### Product Name Resolution
+
+The system includes intelligent product name resolution for cart operations:
+
+**Fuzzy Matching:**
+- Partial names are automatically resolved to full product names
+- Example: "iPhone" → "iPhone 15 Pro"
+- Example: "MacBook" → "MacBook Pro 14-inch"
+
+**Resolution Strategy:**
+1. **Exact Match**: Checks if query matches product name exactly
+2. **Prefix Match**: Checks if query is a prefix of product name (e.g., "iPhone" matches "iPhone 15 Pro")
+3. **Substring Match**: Checks if query appears in product name
+4. **Word Match**: Matches individual words (e.g., "MacBook" matches "MacBook Pro")
+5. **Search Fallback**: If direct resolution fails, searches products using the search engine
+
+**Cart Operations:**
+- "Add iPhone to my cart" - Resolves "iPhone" to "iPhone 15 Pro"
+- "Add MacBook" - Resolves to full product name
+- Works with partial names, plurals, and common abbreviations
+
 ## Technical Decisions
 
 ### Why Hybrid BM25 Search?
@@ -408,6 +489,391 @@ SQLite was chosen for:
 - **Security**: Parameterized queries prevent SQL injection
 
 For production at scale, PostgreSQL would be recommended, but SQLite is perfect for this prototype.
+
+## Pydantic Models & Validation
+
+The project uses Pydantic models for structured data validation, ensuring data integrity before database persistence.
+
+### Product Model
+
+```python
+from pydantic import BaseModel, Field
+from enum import Enum
+
+class StockStatus(str, Enum):
+    """Stock status enumeration."""
+    IN_STOCK = "in_stock"
+    LOW_STOCK = "low_stock"
+    OUT_OF_STOCK = "out_of_stock"
+
+class Product(BaseModel):
+    """Product model with validation."""
+    product_id: str = Field(..., min_length=1, description="Unique product identifier")
+    name: str = Field(..., min_length=1, description="Product name")
+    description: str = Field(..., description="Product description")
+    price: float = Field(..., gt=0, description="Product price (must be greater than 0)")
+    category: str = Field(..., min_length=1, description="Product category")
+    stock_status: StockStatus = Field(..., description="Current stock status")
+```
+
+**Validation Rules:**
+- `product_id`: Required, minimum length 1
+- `name`: Required, minimum length 1
+- `price`: Required, must be greater than 0 (gt=0)
+- `category`: Required, minimum length 1
+- `stock_status`: Required, must be one of: "in_stock", "low_stock", "out_of_stock"
+
+### OrderModel
+
+```python
+from pydantic import BaseModel, Field, field_validator
+from datetime import datetime
+from typing import Optional
+from uuid import uuid4
+
+class OrderModel(BaseModel):
+    """Order model with validation and custom validators."""
+    order_id: str = Field(
+        default_factory=lambda: f"ORD-{uuid4().hex[:8].upper()}",
+        description="Unique order identifier"
+    )
+    product_name: str = Field(..., min_length=1, description="Product name")
+    quantity: int = Field(..., gt=0, description="Order quantity (must be greater than 0)")
+    unit_price: float = Field(..., gt=0, description="Unit price (must be greater than 0)")
+    total_price: Optional[float] = Field(default=None, description="Total price (quantity × unit_price)")
+    customer_name: Optional[str] = Field(None, min_length=1, description="Customer name")
+    customer_email: Optional[str] = Field(None, description="Customer email")
+    timestamp: datetime = Field(default_factory=datetime.now, description="Order timestamp")
+
+    def __init__(self, **data):
+        """Initialize and compute total_price if not provided."""
+        if 'total_price' not in data or data['total_price'] is None:
+            if 'quantity' in data and 'unit_price' in data:
+                data['total_price'] = data['quantity'] * data['unit_price']
+        super().__init__(**data)
+
+    @field_validator('customer_email')
+    @classmethod
+    def validate_email(cls, v: Optional[str]) -> Optional[str]:
+        """Validate email format if provided."""
+        if v is not None:
+            import re
+            email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+            if not re.match(email_pattern, v):
+                raise ValueError("Invalid email format")
+        return v
+```
+
+**Validation Rules:**
+- `order_id`: Auto-generated UUID format (ORD-XXXXXXXX) if not provided
+- `product_name`: Required, minimum length 1
+- `quantity`: Required, must be greater than 0 (gt=0)
+- `unit_price`: Required, must be greater than 0 (gt=0)
+- `total_price`: Optional, auto-calculated as `quantity × unit_price` if not provided
+- `customer_name`: Optional, minimum length 1 if provided
+- `customer_email`: Optional, validated with regex pattern if provided
+- `timestamp`: Auto-generated current datetime if not provided
+
+**Custom Validators:**
+- `total_price`: Automatically calculated from `quantity × unit_price` if not explicitly provided
+- `customer_email`: Validates email format using regex pattern
+
+**Usage Example:**
+```python
+# Valid order
+order = OrderModel(
+    product_name="iPhone 15 Pro",
+    quantity=2,
+    unit_price=999.99,
+    customer_email="customer@example.com"
+)
+# total_price automatically calculated: 1999.98
+
+# Invalid order (will raise ValidationError)
+order = OrderModel(
+    product_name="iPhone 15 Pro",
+    quantity=0,  # ❌ Must be > 0
+    unit_price=-100  # ❌ Must be > 0
+)
+```
+
+## Function Calling Schemas
+
+The chatbot uses OpenAI Function Calling with 7 tools. Below are the schemas for the two core functions required by the assignment:
+
+### 1. search_products Function
+
+```python
+{
+    "type": "function",
+    "function": {
+        "name": "search_products",
+        "description": "Search for products by name, category, or description. Use this when the user asks about product information, prices, or availability. Supports filters like 'laptops under $1000' or 'cheap phones'.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query for products (e.g., 'iPhone', 'laptops under $1000', 'cheap phones')"
+                },
+                "sort_by": {
+                    "type": "string",
+                    "enum": ["relevance", "price_low", "price_high"],
+                    "description": "Sort order for results"
+                }
+            },
+            "required": ["query"]
+        }
+    }
+}
+```
+
+**Parameters:**
+- `query` (string, **required**): Search query for products
+- `sort_by` (string, optional): Sort order - "relevance", "price_low", or "price_high"
+
+**When Called:**
+- User asks about products: "What phones do you have?"
+- User asks about prices: "How much is the iPhone?"
+- User searches with filters: "Show me laptops under $1500"
+
+### 2. create_order Function
+
+```python
+{
+    "type": "function",
+    "function": {
+        "name": "create_order",
+        "description": "Create a single order directly (bypasses cart). Use for quick single-item purchases.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "product_name": {
+                    "type": "string",
+                    "description": "Name of the product to order"
+                },
+                "quantity": {
+                    "type": "integer",
+                    "description": "Quantity to order (must be at least 1)",
+                    "minimum": 1
+                },
+                "unit_price": {
+                    "type": "number",
+                    "description": "Unit price of the product (must be greater than 0)",
+                    "minimum": 0.01
+                },
+                "customer_name": {
+                    "type": "string",
+                    "description": "Customer name (optional)"
+                },
+                "customer_email": {
+                    "type": "string",
+                    "description": "Customer email address (optional)"
+                }
+            },
+            "required": ["product_name", "quantity", "unit_price"]
+        }
+    }
+}
+```
+
+**Parameters:**
+- `product_name` (string, **required**): Name of the product to order
+- `quantity` (integer, **required**): Quantity to order, minimum 1
+- `unit_price` (number, **required**): Unit price, minimum 0.01
+- `customer_name` (string, optional): Customer name
+- `customer_email` (string, optional): Customer email address
+
+**When Called:**
+- User confirms purchase: "I'll take 2 of them"
+- User says: "Place order for iPhone 15 Pro"
+- User says: "Buy the MacBook Pro"
+
+**Function Execution Flow:**
+1. LLM analyzes conversation context
+2. LLM decides which function to call based on user intent
+3. Function is executed with provided parameters
+4. Function result is returned to LLM
+5. LLM generates natural language response incorporating function results
+
+## Agent Logic & Handoff Implementation
+
+The system implements autonomous agent handoff through conversation analysis and function calling. Here's how it works:
+
+### Agent Invocation
+
+Agents are invoked through the chatbot orchestrator based on function calls:
+
+```python
+def handle_message(self, user_input: str) -> str:
+    """Handle user message and route to appropriate agent."""
+    # Add user message to chat history
+    self.chat_history.append({"role": "user", "content": user_input})
+    
+    # Build messages for LLM with function tools
+    messages = [
+        {
+            "role": "system",
+            "content": """You are a helpful e-commerce chatbot assistant.
+            Use search_products to find product information.
+            Use create_order ONLY when user explicitly wants to place an order."""
+        }
+    ]
+    messages.extend(self.chat_history[-10:])  # Last 10 messages for context
+    
+    # Get LLM response with function calling
+    tools = self.get_function_tools()
+    response = self.client.chat.completions.create(
+        model="openai/gpt-4o-mini",
+        messages=messages,
+        tools=tools,
+        tool_choice="auto"  # LLM decides which tool to call
+    )
+    
+    message = response.choices[0].message
+    
+    # Check if LLM wants to call a function
+    if message.tool_calls:
+        for tool_call in message.tool_calls:
+            function_name = tool_call.function.name
+            arguments = json.loads(tool_call.function.arguments)
+            
+            # Route to appropriate agent based on function
+            if function_name == "search_products":
+                # Invoke RAG Agent
+                products = self.rag_agent.search_products(
+                    query=arguments["query"],
+                    k=5
+                )
+                # RAG Agent returns product information
+                
+            elif function_name == "create_order":
+                # Invoke Order Agent
+                order_data = {
+                    "product_name": arguments["product_name"],
+                    "quantity": arguments["quantity"],
+                    "unit_price": arguments["unit_price"]
+                }
+                success, message, order_id = self.order_agent.process_order(order_data)
+                # Order Agent handles stock verification, confirmation, DB persistence
+```
+
+### Handoff Detection Logic
+
+The Order Agent detects purchase intent through two mechanisms:
+
+#### 1. Phrase-Based Detection
+
+```python
+def detect_order_intent(self, chat_history: List[Dict]) -> bool:
+    """Detect if user wants to place an order."""
+    order_phrases = [
+        "i'll take it", "i'll take", "place order", "buy", "purchase",
+        "confirm", "yes, please", "order it", "i want to buy"
+    ]
+    
+    last_user_message = ""
+    for msg in reversed(chat_history):
+        if msg.get("role") == "user":
+            last_user_message = msg.get("content", "").lower()
+            break
+    
+    # Check for explicit order phrases
+    if any(phrase in last_user_message for phrase in order_phrases):
+        return True
+```
+
+#### 2. LLM-Based Detection
+
+```python
+    # Use LLM for nuanced detection
+    system_prompt = """You are an order intent detection system.
+    Analyze the conversation and determine if the user wants to place an order.
+    Respond with only "YES" or "NO"."""
+    
+    conversation_text = "\n".join([
+        f"{msg.get('role', 'unknown').upper()}: {msg.get('content', '')}"
+        for msg in chat_history[-5:]  # Last 5 messages
+    ])
+    
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Conversation:\n{conversation_text}\n\nDoes the user want to place an order? (YES/NO)"}
+    ]
+    
+    response = self.client.chat.completions.create(
+        model="openai/gpt-4o-mini",
+        messages=messages,
+        temperature=0.3,
+        max_tokens=10
+    )
+    answer = response.choices[0].message.content.strip().upper()
+    return "YES" in answer
+```
+
+### Order Extraction from Chat History
+
+The Order Agent extracts order details from conversation context:
+
+```python
+def extract_order_details(self, chat_history: List[Dict]) -> Optional[Dict]:
+    """Extract order details from chat history."""
+    system_prompt = """Extract order details from the conversation.
+    Return JSON with: product_name, quantity, unit_price."""
+    
+    conversation_text = "\n".join([
+        f"{msg.get('role', 'unknown').upper()}: {msg.get('content', '')}"
+        for msg in chat_history[-10:]  # Last 10 messages
+    ])
+    
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Conversation:\n{conversation_text}\n\nExtract order details as JSON."}
+    ]
+    
+    response = self.client.chat.completions.create(
+        model="openai/gpt-4o-mini",
+        messages=messages,
+        response_format={"type": "json_object"}
+    )
+    
+    order_data = json.loads(response.choices[0].message.content)
+    return order_data
+```
+
+### Complete Handoff Flow
+
+```
+User: "What's the price of iPhone 15 Pro?"
+  ↓
+Chatbot → LLM Analysis → Calls search_products("iPhone 15 Pro")
+  ↓
+RAG Agent invoked → Searches vector store → Returns product info
+  ↓
+Bot: "The iPhone 15 Pro is priced at $999.99 and is currently in stock."
+
+User: "I'll take 2 of them"
+  ↓
+Chatbot → LLM Analysis → Detects order intent → Calls create_order()
+  ↓
+Order Agent invoked:
+  1. Extracts: product_name="iPhone 15 Pro", quantity=2, unit_price=999.99
+  2. Verifies stock from vector store
+  3. Requests confirmation: "Confirm order for 2x iPhone 15 Pro @ $999.99?"
+  
+User: "Yes"
+  ↓
+Order Agent:
+  4. Validates with Pydantic OrderModel
+  5. Persists to SQLite database
+  6. Returns: "Order confirmed! Order ID: ORD-ABC12345"
+```
+
+**Key Points:**
+- **Autonomous**: No manual routing - LLM decides based on conversation
+- **Context-Aware**: Extracts details from full chat history
+- **Seamless**: Smooth transition between agents
+- **Validated**: All data validated with Pydantic before persistence
 
 ## Stock Verification
 

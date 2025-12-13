@@ -165,9 +165,8 @@ with st.sidebar:
     st.markdown("### 🛠️ Tech Stack")
     st.markdown("""
     - **LLM**: GPT-4o-mini (OpenRouter)
-    - **Search**: Hybrid BM25 + Semantic
+    - **RAG**: Keyword Search
     - **Database**: SQLite
-    - **Cart**: Multi-item support
     - **Validation**: Pydantic
     - **Tracing**: Langfuse
     """)

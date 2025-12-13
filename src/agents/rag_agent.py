@@ -1,7 +1,7 @@
 """RAG Agent for product information retrieval."""
 
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import chromadb
 from chromadb.config import Settings
@@ -81,18 +81,33 @@ class RAGAgent:
         """
         logger.info(f"Searching products with query: {query}")
         
+        # Extract filters before search (for fallback if needed)
+        price_filter = self.hybrid_search._extract_price_filter(query)
+        categories = self.hybrid_search._extract_categories(query)
+        category_filter = categories[0] if categories else None
+        
         # Use hybrid search engine (BM25 + semantic matching)
         products = self.hybrid_search.search(query, k=k, sort_by=sort_by)
         
-        if products:
+        # Check if results are grouped by category (dict) or flat list
+        if isinstance(products, dict):
+            # Multi-category results - extract first product from first category
+            all_products = []
+            for category_products in products.values():
+                all_products.extend(category_products)
+            if all_products:
+                self.last_product = all_products[0].get('name')
+                logger.info(f"Found products in {len(products)} categories for query: {query}")
+            return products
+        elif products:
             self.last_product = products[0].get('name')
             logger.info(f"Found {len(products)} products for query: {query}")
         else:
-            # Fallback to basic keyword search
-            products = self._keyword_search(query, k)
+            # Fallback to basic keyword search WITH filters applied
+            products = self._keyword_search(query, k, price_filter=price_filter, category_filter=category_filter)
             if products:
                 self.last_product = products[0].get('name')
-                logger.info(f"Fallback found {len(products)} products for query: {query}")
+                logger.info(f"Fallback found {len(products)} products for query: {query} (with filters applied)")
             else:
                 logger.warning(f"No products found for query: {query}")
         
@@ -111,8 +126,14 @@ class RAGAgent:
         """
         return self.hybrid_search.get_recommendations(product_name, k=k)
 
-    def _keyword_search(self, query: str, k: int = 3) -> List[Dict]:
-        """Keyword-based search using products.json directly."""
+    def _keyword_search(
+        self, 
+        query: str, 
+        k: int = 3,
+        price_filter: Optional[Tuple[float, float]] = None,
+        category_filter: Optional[str] = None
+    ) -> List[Dict]:
+        """Keyword-based search using products.json directly with price and category filters."""
         import json
         from pathlib import Path
         
@@ -156,6 +177,56 @@ class RAGAgent:
             
             scored_products = []
             for product in all_products:
+                # Apply price filter if present
+                if price_filter:
+                    price = float(product.get('price', 0))
+                    min_price, max_price = price_filter
+                    if price < min_price or price > max_price:
+                        continue
+                
+                # Apply category filter if present
+                if category_filter:
+                    product_category = product.get('category', '').lower()
+                    product_name = product.get('name', '').lower()
+                    product_desc = product.get('description', '').lower()
+                    
+                    category_match = False
+                    if category_filter == 'phones':
+                        phone_keywords = ['iphone', 'samsung', 'galaxy', 'smartphone', 'mobile phone', 'cell phone']
+                        exclude_keywords = ['headphone', 'earbud', 'airpod', 'speaker']
+                        is_excluded = any(kw in product_name or kw in product_desc for kw in exclude_keywords)
+                        if not is_excluded:
+                            category_match = any(kw in product_name or kw in product_desc for kw in phone_keywords) or 'phone' in product_name
+                    elif category_filter == 'computers':
+                        computer_keywords = ['laptop', 'macbook', 'computer', 'pc', 'desktop', 'xps', 'notebook']
+                        category_match = any(kw in product_name or kw in product_desc for kw in computer_keywords)
+                    elif category_filter == 'audio':
+                        audio_keywords = ['headphone', 'earbud', 'speaker', 'airpod', 'audio', 'sound']
+                        category_match = any(kw in product_name or kw in product_desc for kw in audio_keywords)
+                    elif category_filter == 'gaming':
+                        gaming_keywords = ['playstation', 'xbox', 'nintendo', 'console', 'controller', 'switch', 'ps5']
+                        category_match = any(kw in product_name or kw in product_desc for kw in gaming_keywords)
+                        if any(exclude in product_name or exclude in product_desc for exclude in ['laptop', 'macbook', 'computer', 'xps', 'dell']):
+                            category_match = False
+                    elif category_filter == 'books':
+                        if 'book' in product_category.lower():
+                            category_match = True
+                        else:
+                            book_keywords = ['book', 'novel', 'reading']
+                            exclude_keywords = ['macbook', 'notebook', 'laptop']
+                            has_book_keyword = any(kw in product_name or kw in product_desc for kw in book_keywords)
+                            is_excluded = any(kw in product_name for kw in exclude_keywords)
+                            category_match = has_book_keyword and not is_excluded
+                    elif category_filter == 'wearables':
+                        wearable_keywords = ['watch', 'smartwatch', 'fitness', 'tracker', 'wearable']
+                        category_match = any(kw in product_name or kw in product_desc for kw in wearable_keywords)
+                    elif category_filter == 'electronics':
+                        category_match = 'electronics' in product_category.lower()
+                    
+                    if not category_match:
+                        continue
+                
+                # Score products by keyword matching
                 score = 0
                 searchable = f"{product.get('name', '')} {product.get('description', '')} {product.get('category', '')}".lower()
                 for keyword in expanded_keywords:
@@ -164,6 +235,7 @@ class RAGAgent:
                         # Bonus for exact name match
                         if keyword in product.get('name', '').lower():
                             score += 2
+                
                 if score > 0:
                     scored_products.append((score, product))
             

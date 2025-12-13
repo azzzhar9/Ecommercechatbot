@@ -338,4 +338,55 @@ Return a JSON object with these fields. If information is missing, use null."""
         except Exception as e:
             logger.error(f"Error processing order: {str(e)}", exc_info=True)
             return False, "An error occurred while processing your order. Please try again.", None
+    
+    def process_order_without_confirmation(self, order_data: Dict) -> Tuple[bool, str, Optional[str]]:
+        """
+        Process and save order to database WITHOUT interactive confirmation (for checkout).
+        
+        Args:
+            order_data: Dictionary with order details
+        
+        Returns:
+            Tuple of (success, message, order_id)
+        """
+        try:
+            # Verify stock
+            can_proceed, stock_message = self.verify_stock(order_data['product_name'])
+            if not can_proceed:
+                return False, stock_message, None
+            
+            # Get price from metadata (or use unit_price from cart if available)
+            unit_price = self.get_product_price(order_data['product_name'])
+            if unit_price is None:
+                # Try to get price from order_data if it's a cart item
+                unit_price = order_data.get('unit_price')
+                if unit_price is None:
+                    return False, f"Could not retrieve price for {order_data['product_name']}. Please try again.", None
+            
+            # Calculate total
+            quantity = order_data['quantity']
+            total_price = quantity * unit_price
+            
+            # Create OrderModel
+            order = OrderModel(
+                product_name=order_data['product_name'],
+                quantity=quantity,
+                unit_price=unit_price,
+                total_price=total_price,
+                customer_name=order_data.get('customer_name'),
+                customer_email=order_data.get('customer_email')
+            )
+            
+            # Save to database (skip confirmation for checkout)
+            order_id = create_order(order, self.db_path)
+            
+            confirmation_message = (
+                f"Order confirmed for {order.product_name} x{order.quantity} - ${order.total_price:.2f}"
+            )
+            
+            return True, confirmation_message, order_id
+            
+        except Exception as e:
+            logger.error(f"Error processing order without confirmation: {str(e)}", exc_info=True)
+            return False, f"An error occurred while processing your order: {str(e)}", None
 
