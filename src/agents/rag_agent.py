@@ -9,6 +9,7 @@ from openai import OpenAI
 
 from src.logger import get_logger
 from src.search import get_search_engine, HybridSearch
+from src.cache import get_search_cache
 
 logger = get_logger()
 
@@ -59,6 +60,9 @@ class RAGAgent:
         
         # Initialize hybrid search engine
         self.hybrid_search = get_search_engine()
+        
+        # Initialize cache
+        self.search_cache = get_search_cache()
     
     def search_products(
         self,
@@ -79,6 +83,31 @@ class RAGAgent:
         Returns:
             List of product dictionaries with metadata
         """
+        # #region agent log
+        import time
+        import json
+        search_start = time.time()
+        try:
+            with open(r'e:\AIFinalProject\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"rag_agent.py:90","message":"search_products START","data":{"query":query,"k":k},"sessionId":"debug-session","runId":"run1","hypothesisId":"C"}) + '\n')
+        except: pass
+        # #endregion
+        
+        # Create cache key from query parameters
+        cache_key = f"search:{query.lower().strip()}:k{k}:sort{sort_by}"
+        
+        # Check cache first
+        cached_result = self.search_cache.get(cache_key)
+        if cached_result is not None:
+            logger.info(f"Cache hit for query: {query}")
+            # #region agent log
+            try:
+                with open(r'e:\AIFinalProject\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"rag_agent.py:98","message":"search_products CACHE HIT","data":{"query":query},"sessionId":"debug-session","runId":"run1","hypothesisId":"F"}) + '\n')
+            except: pass
+            # #endregion
+            return cached_result
+        
         logger.info(f"Searching products with query: {query}")
         
         # Extract filters before search (for fallback if needed)
@@ -89,6 +118,11 @@ class RAGAgent:
         # Use hybrid search engine (BM25 + semantic matching)
         products = self.hybrid_search.search(query, k=k, sort_by=sort_by)
         
+        # #region agent log
+        search_end = time.time()
+        search_duration = search_end - search_start
+        # #endregion
+        
         # Check if results are grouped by category (dict) or flat list
         if isinstance(products, dict):
             # Multi-category results - extract first product from first category
@@ -98,18 +132,44 @@ class RAGAgent:
             if all_products:
                 self.last_product = all_products[0].get('name')
                 logger.info(f"Found products in {len(products)} categories for query: {query}")
+            # Cache the result
+            self.search_cache.set(cache_key, products)
+            # #region agent log
+            try:
+                with open(r'e:\AIFinalProject\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"rag_agent.py:114","message":"search_products END","data":{"query":query,"duration_ms":search_duration*1000,"result_type":"dict","categories":len(products)},"sessionId":"debug-session","runId":"run1","hypothesisId":"C"}) + '\n')
+            except: pass
+            # #endregion
             return products
         elif products:
             self.last_product = products[0].get('name')
             logger.info(f"Found {len(products)} products for query: {query}")
+            # Cache the result
+            self.search_cache.set(cache_key, products)
+            # #region agent log
+            try:
+                with open(r'e:\AIFinalProject\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"rag_agent.py:120","message":"search_products END","data":{"query":query,"duration_ms":search_duration*1000,"result_type":"list","count":len(products)},"sessionId":"debug-session","runId":"run1","hypothesisId":"C"}) + '\n')
+            except: pass
+            # #endregion
         else:
             # Fallback to basic keyword search WITH filters applied
             products = self._keyword_search(query, k, price_filter=price_filter, category_filter=category_filter)
             if products:
                 self.last_product = products[0].get('name')
                 logger.info(f"Fallback found {len(products)} products for query: {query} (with filters applied)")
+                # Cache the result
+                self.search_cache.set(cache_key, products)
             else:
                 logger.warning(f"No products found for query: {query}")
+                # Cache empty result to avoid repeated searches
+                self.search_cache.set(cache_key, [], ttl=60)  # Shorter TTL for empty results
+            # #region agent log
+            try:
+                with open(r'e:\AIFinalProject\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                    f.write(json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"rag_agent.py:128","message":"search_products END (fallback)","data":{"query":query,"duration_ms":search_duration*1000,"count":len(products) if products else 0},"sessionId":"debug-session","runId":"run1","hypothesisId":"C"}) + '\n')
+            except: pass
+            # #endregion
         
         return products
     

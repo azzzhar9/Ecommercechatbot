@@ -2,6 +2,8 @@
 
 import os
 import uuid
+import time
+import json
 from typing import Dict, List, Optional
 
 from openai import OpenAI
@@ -12,6 +14,7 @@ from src.database import init_database
 from src.logger import get_logger, setup_logger
 from src.tracing import get_tracer, traced
 from src.cart import ShoppingCart, CartManager
+from src.cache import get_stock_cache, get_product_cache
 
 logger = get_logger()
 
@@ -76,6 +79,10 @@ class EcommerceChatbot:
         # Session memory for browsed products
         self.browsed_products: List[Dict] = []
         
+        # Initialize caches
+        self.stock_cache = get_stock_cache()
+        self.product_cache = get_product_cache()
+        
         # Initialize Langfuse tracer
         self.tracer = get_tracer()
         
@@ -83,6 +90,19 @@ class EcommerceChatbot:
         setup_logger(session_id=self.session_id)
         
         logger.info(f"Chatbot initialized with session ID: {self.session_id}")
+    
+    def _flush_tracer_async(self):
+        """Flush tracer asynchronously to avoid blocking response."""
+        import threading
+        def flush_in_background():
+            try:
+                self.tracer.flush()
+            except Exception as e:
+                logger.debug(f"Background flush error (non-critical): {e}")
+        
+        # Start flush in background thread
+        thread = threading.Thread(target=flush_in_background, daemon=True)
+        thread.start()
     
     def sanitize_input(self, text: str) -> str:
         """
@@ -111,6 +131,13 @@ class EcommerceChatbot:
         Returns:
             Product dict with exact name and price, or None if not found
         """
+        # Check cache first
+        cache_key = f"product_resolve:{product_name.lower().strip()}"
+        cached_result = self.product_cache.get(cache_key)
+        if cached_result is not None:
+            logger.debug(f"Cache hit for product resolution: {product_name}")
+            return cached_result
+        
         import json
         from pathlib import Path
         
@@ -133,13 +160,19 @@ class EcommerceChatbot:
             # Try exact match first
             for product in all_products:
                 if product_name_lower in product.get('name', '').lower():
-                    return product
+                    result = product
+                    # Cache the result
+                    self.product_cache.set(cache_key, result)
+                    return result
             
             # Try normalized match (plural handling)
             for product in all_products:
                 product_name_db = product.get('name', '').lower()
                 if product_name_normalized in product_name_db or product_name_db.startswith(product_name_normalized):
-                    return product
+                    result = product
+                    # Cache the result
+                    self.product_cache.set(cache_key, result)
+                    return result
             
             # Try fuzzy match - check if any word matches or if query is substring
             # This handles cases like "iPhone" -> "iPhone 15 Pro"
@@ -155,7 +188,10 @@ class EcommerceChatbot:
                 if product_name_normalized in product_name_db:
                     # Prefer matches where query is at the start (better match)
                     if product_name_db.startswith(product_name_normalized):
-                        return product  # Best match - return immediately
+                        result = product  # Best match - return immediately
+                        # Cache the result
+                        self.product_cache.set(cache_key, result)
+                        return result
                     # Otherwise, track as potential match
                     if best_match is None or len(product_name_db) < len(best_match.get('name', '').lower()):
                         best_match = product
@@ -170,7 +206,13 @@ class EcommerceChatbot:
                     best_score = matches
                     best_match = product
             
-            return best_match if best_score > 0 else None
+            result = best_match if best_score > 0 else None
+            # Cache the result (even if None to avoid repeated lookups)
+            if result:
+                self.product_cache.set(cache_key, result)
+            else:
+                self.product_cache.set(cache_key, None, ttl=60)  # Shorter TTL for misses
+            return result
             
         except Exception as e:
             logger.error(f"Error resolving product name: {str(e)}")
@@ -673,6 +715,15 @@ Thank you for your purchase! 🎉
                 }
             
             elif function_name == "get_stock_info":
+                # Get stock information for all products (with caching)
+                cache_key = "stock_info:all"
+                
+                # Check cache first
+                cached_result = self.stock_cache.get(cache_key)
+                if cached_result is not None:
+                    logger.info("Cache hit for stock information")
+                    return cached_result
+                
                 # Get all products with stock information
                 import json
                 from pathlib import Path
@@ -696,38 +747,82 @@ Thank you for your purchase! 🎉
                             categories[category] = []
                         categories[category].append(product)
                     
-                    # Format stock information
-                    result_text = "**Stock Information for All Products:**\n\n"
+                    # Format stock information with professional layout
+                    result_text = "## 📦 Stock Information for All Products\n\n"
+                    result_text += "---\n\n"
+                    
+                    # Category icons mapping
+                    category_icons = {
+                        'Electronics': '⚡',
+                        'Clothing': '👕',
+                        'Books': '📚',
+                        'Home & Kitchen': '🏠',
+                        'Home & Garden': '🏠',
+                        'Sports & Outdoors': '⚽',
+                        'Sports': '⚽',
+                        'Toys & Games': '🎮',
+                        'Beauty & Personal Care': '💄',
+                        'Health & Household': '💊'
+                    }
+                    
+                    # Calculate statistics
+                    total_in_stock = 0
+                    total_low_stock = 0
+                    total_out_of_stock = 0
                     
                     for category, products in sorted(categories.items()):
-                        result_text += f"**{category}:**\n"
-                        for product in products:
+                        # Get category icon
+                        icon = category_icons.get(category, '📦')
+                        result_text += f"### {icon} {category}\n\n"
+                        
+                        # Sort products by name for better readability
+                        sorted_products = sorted(products, key=lambda x: x.get('name', ''))
+                        
+                        for product in sorted_products:
                             name = product.get('name', 'N/A')
                             price = product.get('price', 0)
                             stock_status = product.get('stock_status', 'unknown')
                             
-                            # Format stock status
+                            # Format stock status with consistent spacing
                             if stock_status == 'in_stock':
                                 stock_display = "✅ In Stock"
+                                total_in_stock += 1
                             elif stock_status == 'low_stock':
                                 stock_display = "⚠️ Low Stock"
+                                total_low_stock += 1
                             elif stock_status == 'out_of_stock':
                                 stock_display = "❌ Out of Stock"
+                                total_out_of_stock += 1
                             else:
                                 stock_display = f"❓ {stock_status}"
                             
-                            result_text += f"  • {name} - ${price:.2f} - {stock_display}\n"
+                            # Format with consistent alignment (using fixed-width spacing)
+                            # Product name, price aligned, stock status
+                            result_text += f"  • **{name}** - ${price:.2f} - {stock_display}\n"
+                        
                         result_text += "\n"
                     
-                    result_text += f"\n**Total Products:** {len(all_products)}"
-                    result_text += f"\n**Total Categories:** {len(categories)}"
+                    # Professional summary section
+                    result_text += "---\n\n"
+                    result_text += "### 📊 Summary Statistics\n\n"
+                    result_text += f"| Metric | Count |\n"
+                    result_text += f"|--------|-------|\n"
+                    result_text += f"| **Total Products** | {len(all_products)} |\n"
+                    result_text += f"| **Total Categories** | {len(categories)} |\n"
+                    result_text += f"| **✅ In Stock** | {total_in_stock} |\n"
+                    result_text += f"| **⚠️ Low Stock** | {total_low_stock} |\n"
+                    result_text += f"| **❌ Out of Stock** | {total_out_of_stock} |\n"
                     
-                    return {
+                    result = {
                         "success": True,
                         "result": result_text,
                         "products": all_products,
                         "categories": list(categories.keys())
                     }
+                    
+                    # Cache the result
+                    self.stock_cache.set(cache_key, result)
+                    return result
                     
                 except Exception as e:
                     logger.error(f"Error getting stock info: {str(e)}", exc_info=True)
@@ -868,6 +963,14 @@ Thank you for your purchase! 🎉
         Returns:
             Bot's response
         """
+        # #region agent log
+        handle_start = time.time()
+        try:
+            with open(r'e:\AIFinalProject\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"chatbot.py:954","message":"handle_message START","data":{"user_input":user_input[:50],"sessionId":self.session_id},"sessionId":"debug-session","runId":"run1","hypothesisId":"A"}) + '\n')
+        except: pass
+        # #endregion
+        
         logger.debug(f"[DEBUG] handle_message called with user_input: {user_input}")
         # Create trace for this conversation turn
         trace = self.tracer.trace(
@@ -900,8 +1003,11 @@ Always use exact prices from search results."""
                 }
             ]
             
-            # Add chat history
-            messages.extend(self.chat_history[-10:])  # Last 10 messages for context
+            # Add chat history - use reduced context for better latency
+            # For order processing, minimal context is sufficient since details come from function arguments
+            # For general queries, 5 messages provide sufficient context
+            context_size = 5  # Default: last 5 messages
+            messages.extend(self.chat_history[-context_size:])
             
             # Get response with function calling
             tools = self.get_function_tools()
@@ -914,6 +1020,14 @@ Always use exact prices from search results."""
                     # Use model from environment or default
                     model = os.getenv("OPENAI_MODEL", "openai/gpt-4o-mini")
                     logger.info(f"Making API call to {model}...")
+                    
+                    # #region agent log
+                    llm_call_start = time.time()
+                    try:
+                        with open(r'e:\AIFinalProject\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"chatbot.py:1023","message":"LLM call START","data":{"model":model,"messages_count":len(messages),"retry_count":retry_count},"sessionId":"debug-session","runId":"run1","hypothesisId":"D"}) + '\n')
+                    except: pass
+                    # #endregion
                     
                     # Create LLM generation span for Langfuse
                     llm_gen = self.tracer.generation(
@@ -932,6 +1046,15 @@ Always use exact prices from search results."""
                         temperature=0.7,
                         max_tokens=500
                     )
+                    
+                    # #region agent log
+                    llm_call_end = time.time()
+                    llm_call_duration = llm_call_end - llm_call_start
+                    try:
+                        with open(r'e:\AIFinalProject\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"chatbot.py:1044","message":"LLM call END","data":{"duration_ms":llm_call_duration*1000,"has_tool_calls":bool(response.choices[0].message.tool_calls)},"sessionId":"debug-session","runId":"run1","hypothesisId":"D"}) + '\n')
+                    except: pass
+                    # #endregion
                     
                     # End generation with output and usage
                     usage_info = {}
@@ -961,6 +1084,14 @@ Always use exact prices from search results."""
                             
                             logger.info(f"Function called: {function_name} with args: {arguments}")
                             
+                            # #region agent log
+                            func_start = time.time()
+                            try:
+                                with open(r'e:\AIFinalProject\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                                    f.write(json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"chatbot.py:1068","message":"Function execution START","data":{"function_name":function_name},"sessionId":"debug-session","runId":"run1","hypothesisId":"C"}) + '\n')
+                            except: pass
+                            # #endregion
+                            
                             # Create span for function execution
                             func_span = self.tracer.span(
                                 trace=trace,
@@ -970,6 +1101,15 @@ Always use exact prices from search results."""
                             
                             # Execute function
                             function_result = self.execute_function(function_name, arguments)
+                            
+                            # #region agent log
+                            func_end = time.time()
+                            func_duration = func_end - func_start
+                            try:
+                                with open(r'e:\AIFinalProject\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                                    f.write(json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"chatbot.py:1072","message":"Function execution END","data":{"function_name":function_name,"duration_ms":func_duration*1000,"success":function_result.get("success",False)},"sessionId":"debug-session","runId":"run1","hypothesisId":"C"}) + '\n')
+                            except: pass
+                            # #endregion
                             function_results.append(function_result)
                             
                             # End function span
@@ -1196,18 +1336,41 @@ Always use exact prices from search results."""
                         
                         # If we still don't have a response, try LLM call
                         if not bot_response:
+                            # #region agent log
+                            fallback_start = time.time()
+                            try:
+                                with open(r'e:\AIFinalProject\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                                    f.write(json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"chatbot.py:1294","message":"FALLBACK LLM call triggered","data":{"chat_history_length":len(self.chat_history)},"sessionId":"debug-session","runId":"run1","hypothesisId":"A"}) + '\n')
+                            except: pass
+                            # #endregion
                             try:
                                 logger.info("Making API call to generate response...")
-                                response = client.chat.completions.create(
+                                # Fix: Use self.client instead of client, and use reduced context
+                                response = self.client.chat.completions.create(
                                     model=os.getenv("OPENAI_MODEL", "openai/gpt-4o-mini"),
-                                    messages=self.chat_history,
+                                    messages=messages[-3:],  # Use minimal context for fallback
                                     temperature=0.7,
                                     timeout=30.0
                                 )
                                 message = response.choices[0].message
                                 bot_response = message.content
                                 logger.info("LLM response generated successfully")
+                                
+                                # #region agent log
+                                fallback_end = time.time()
+                                fallback_duration = fallback_end - fallback_start
+                                try:
+                                    with open(r'e:\AIFinalProject\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                                        f.write(json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"chatbot.py:1305","message":"FALLBACK LLM call END","data":{"duration_ms":fallback_duration*1000},"sessionId":"debug-session","runId":"run1","hypothesisId":"A"}) + '\n')
+                                except: pass
+                                # #endregion
                             except Exception as e:
+                                # #region agent log
+                                try:
+                                    with open(r'e:\AIFinalProject\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                                        f.write(json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"chatbot.py:1307","message":"FALLBACK LLM call ERROR","data":{"error":str(e)[:100]},"sessionId":"debug-session","runId":"run1","hypothesisId":"E"}) + '\n')
+                                except: pass
+                                # #endregion
                                 logger.error(f"Failed to generate LLM response: {str(e)}")
                                 bot_response = "I processed your request, but couldn't generate a response. Please try again."
                         
@@ -1228,7 +1391,18 @@ Always use exact prices from search results."""
                     
                     self.chat_history.append({"role": "assistant", "content": bot_response})
                     trace.end(output={"response": bot_response[:200], "success": True})
-                    self.tracer.flush()
+                    # Flush asynchronously to avoid blocking response
+                    self._flush_tracer_async()
+                    
+                    # #region agent log
+                    handle_end = time.time()
+                    total_duration = handle_end - handle_start
+                    try:
+                        with open(r'e:\AIFinalProject\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                            f.write(json.dumps({"id":f"log_{int(time.time()*1000)}","timestamp":int(time.time()*1000),"location":"chatbot.py:1320","message":"handle_message END","data":{"total_duration_ms":total_duration*1000,"response_length":len(bot_response)},"sessionId":"debug-session","runId":"run1","hypothesisId":"A"}) + '\n')
+                    except: pass
+                    # #endregion
+                    
                     logger.info(f"Returning response to user: {bot_response[:100] if len(bot_response) > 100 else bot_response}")
                     return bot_response
                     
@@ -1242,13 +1416,15 @@ Always use exact prices from search results."""
                     else:
                         logger.error(f"Failed to get response after {max_retries} attempts: {str(e)}", exc_info=True)
                         trace.end(output={"error": str(e), "success": False})
-                        self.tracer.flush()
+                        # Flush asynchronously to avoid blocking response
+                        self._flush_tracer_async()
                         return "I'm sorry, I'm having trouble processing your request right now. Please try again in a moment."
             
         except Exception as e:
             logger.error(f"Error handling message: {str(e)}", exc_info=True)
             trace.end(output={"error": str(e), "success": False})
-            self.tracer.flush()
+            # Flush asynchronously to avoid blocking response
+            self._flush_tracer_async()
             return "I encountered an error. Please try again."
     
     def run(self):
