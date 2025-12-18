@@ -225,29 +225,44 @@ class HybridSearch:
             segment_normalized = segment.rstrip('s') if segment.endswith('s') and len(segment) > 3 else segment
             words = segment.split()
             segment_matched = False
+            
+            # First, try exact segment match (e.g., "home" should match "home_garden")
             for category, keywords in categories.items():
                 if category == 'books' and not is_explicit_book_segment(segment):
                     continue
+                # Check if segment exactly matches any keyword
+                if segment in keywords or segment_normalized in keywords:
+                    if category not in found_categories:
+                        found_categories.append(category)
+                    segment_matched = True
+                    break
+                # Check if any keyword exactly matches the segment
                 for keyword in keywords:
                     if segment == keyword or segment_normalized == keyword:
                         if category not in found_categories:
                             found_categories.append(category)
                         segment_matched = True
                         break
-                    if len(segment) >= 4 and keyword.startswith(segment):
-                        if category not in found_categories:
-                            found_categories.append(category)
-                        segment_matched = True
-                        break
-                    if segment == keyword[:len(segment)] and len(segment) >= 3:
-                        if category == 'books' and not is_explicit_book_segment(segment):
-                            continue
-                        if category not in found_categories:
-                            found_categories.append(category)
-                        segment_matched = True
-                        break
+                # Explicit handling for common single-word category matches
+                if segment == 'home' and category == 'home_garden':
+                    if category not in found_categories:
+                        found_categories.append(category)
+                    segment_matched = True
+                    break
+                if segment == 'sport' and category == 'sports':
+                    if category not in found_categories:
+                        found_categories.append(category)
+                    segment_matched = True
+                    break
+                if segment in ['cloth', 'clothes', 'clothing'] and category == 'clothing':
+                    if category not in found_categories:
+                        found_categories.append(category)
+                    segment_matched = True
+                    break
                 if segment_matched:
                     break
+            
+            # If segment didn't match, try word-by-word matching
             if not segment_matched:
                 # #region agent log
                 try:
@@ -286,7 +301,9 @@ class HybridSearch:
                                 if category not in found_categories:
                                     found_categories.append(category)
                                 break
-                            if word in keyword_lower or keyword_lower in word:
+                            # Use word boundary matching to prevent category leakage (e.g., "book" matching "notebook")
+                            pattern = r'\b' + re.escape(keyword_lower) + r'\b'
+                            if re.search(pattern, word) or re.search(pattern, word_normalized):
                                 if category == 'books' and not is_explicit_book_segment(word):
                                     continue
                                 if category not in found_categories:
@@ -346,6 +363,45 @@ class HybridSearch:
         categories = self._extract_categories(query)
         return categories[0] if categories else None
     
+    def decompose_query(self, query: str) -> Dict:
+        """
+        Decompose query into structured intent without performing search.
+        
+        Returns structured intent dict with:
+        - products: List of product names/terms mentioned
+        - categories: List of detected categories
+        - filters: Dict with price, stock, and other filters
+        
+        Args:
+            query: User search query
+            
+        Returns:
+            Dict with structured intent information
+        """
+        # Extract categories
+        categories = self._extract_categories(query)
+        
+        # Extract price filter
+        price_filter = self._extract_price_filter(query)
+        
+        # Extract product terms (simplified - just tokenize and remove stop words)
+        query_terms = self._tokenize(query)
+        stop_words = {'show', 'me', 'i', 'want', 'find', 'search', 'for', 'looking', 'stock', 'the', 'a', 'an', 'and', 'or', 'but'}
+        product_terms = [term for term in query_terms if term not in stop_words and len(term) > 2]
+        
+        # Build structured intent
+        intent = {
+            "products": product_terms,
+            "categories": categories,
+            "filters": {
+                "price": price_filter,
+                "stock": None  # Can be extended later
+            },
+            "original_query": query
+        }
+        
+        return intent
+    
     def _bm25_score(self, query_terms: List[str], doc_idx: int) -> float:
         """Calculate BM25 score for a document."""
         if doc_idx >= len(self.term_frequencies):
@@ -385,19 +441,94 @@ class HybridSearch:
             return 0.2
         return 0
     
+    def _matches_category(self, product: Dict, category_filter: str, query: str = "") -> bool:
+        """
+        Check if a product matches a given category filter.
+        
+        Args:
+            product: Product dictionary
+            category_filter: Category to check against
+            query: Original query (for context-dependent matching)
+            
+        Returns:
+            True if product matches category
+        """
+        product_category = product.get('category', '').lower()
+        product_name = product.get('name', '').lower()
+        product_desc = product.get('description', '').lower()
+        
+        category_match = False
+        if category_filter == 'phones':
+            phone_keywords = ['iphone', 'samsung', 'galaxy', 'smartphone', 'mobile phone', 'cell phone']
+            exclude_keywords = ['headphone', 'earbud', 'airpod', 'speaker']
+            is_excluded = any(kw in product_name or kw in product_desc for kw in exclude_keywords)
+            if not is_excluded:
+                category_match = any(kw in product_name or kw in product_desc for kw in phone_keywords) or 'phone' in product_name
+        elif category_filter == 'electronics':
+            category_match = 'electronics' in product_category
+        elif category_filter == 'audio':
+            audio_keywords = ['headphone', 'earbud', 'speaker', 'airpod', 'audio', 'sound']
+            category_match = any(kw in product_name or kw in product_desc for kw in audio_keywords)
+        elif category_filter == 'computers':
+            computer_keywords = ['laptop', 'macbook', 'computer', 'pc', 'desktop', 'xps', 'notebook']
+            category_match = any(kw in product_name or kw in product_desc for kw in computer_keywords)
+        elif category_filter == 'gaming':
+            gaming_keywords = ['playstation', 'xbox', 'nintendo', 'console', 'controller', 'switch', 'ps5', 'gaming']
+            category_match = any(kw in product_name or kw in product_desc for kw in gaming_keywords)
+            if 'accessories' in query.lower() or 'accessory' in query.lower():
+                if 'accessories' in product_name.lower() or 'accessory' in product_name.lower():
+                    if any(gk in product_name or gk in product_desc for gk in ['console', 'controller', 'playstation', 'xbox', 'nintendo']):
+                        category_match = True
+            if any(exclude in product_name or exclude in product_desc for exclude in ['laptop', 'macbook', 'computer', 'xps', 'dell']):
+                category_match = False
+        elif category_filter == 'wearables':
+            wearable_keywords = ['watch', 'smartwatch', 'fitness', 'tracker', 'wearable']
+            category_match = any(kw in product_name or kw in product_desc for kw in wearable_keywords)
+        elif category_filter == 'books':
+            if 'book' in product_category.lower():
+                category_match = True
+            else:
+                book_keywords = ['book', 'novel', 'reading']
+                exclude_keywords = ['macbook', 'notebook', 'laptop']
+                has_book_keyword = any(kw in product_name or kw in product_desc for kw in book_keywords)
+                is_excluded = any(kw in product_name for kw in exclude_keywords)
+                category_match = has_book_keyword and not is_excluded
+        elif category_filter == 'home_garden':
+            category_match = (
+                ('home' in product_category and 'garden' in product_category) or 
+                product_category == 'home & garden' or
+                product_category == 'home and garden' or
+                product_category == 'home garden'
+            )
+            if not category_match:
+                home_keywords = ['vacuum', 'appliance', 'coffee', 'kitchen', 'roomba', 'dyson', 'instant pot', 'nespresso', 'philips hue']
+                category_match = any(kw in product_name or kw in product_desc for kw in home_keywords)
+        elif category_filter == 'clothing':
+            category_match = 'clothing' in product_category.lower()
+            if not category_match:
+                clothing_keywords = ['shoes', 'sneakers', 'jeans', 'jacket', 'sweater', 'nike', 'adidas', 'levi', 'patagonia', 'north face']
+                category_match = any(kw in product_name.lower() or kw in product_desc.lower() for kw in clothing_keywords)
+        elif category_filter == 'sports':
+            category_match = 'sport' in product_category.lower()
+            if not category_match:
+                sports_keywords = ['yoga', 'mat', 'fitness', 'gym', 'running', 'bike', 'peloton', 'water bottle', 'dumbbell']
+                category_match = any(kw in product_name.lower() or kw in product_desc.lower() for kw in sports_keywords)
+        
+        return category_match
+    
     def search(
         self,
         query: str,
-        k: int = 5,
+        k: int = 10,
         sort_by: str = 'relevance',  # 'relevance', 'price_low', 'price_high'
         in_stock_only: bool = False
     ):
         """
-        Search products using hybrid BM25 + semantic matching.
+        Search products using unified BM25 search (single pass for all categories).
         
         Args:
             query: Search query
-            k: Number of results to return
+            k: Number of results to return per category (for multi-category) or total (for single)
             sort_by: Sort order ('relevance', 'price_low', 'price_high')
             in_stock_only: Filter to only in-stock products
         
@@ -414,36 +545,10 @@ class HybridSearch:
         price_filter = self._extract_price_filter(query)
         categories = self._extract_categories(query)
         
-        # Decision point: Multiple categories vs Single category vs No category
-        # Multiple categories (explicit separators like comma, "and") -> return grouped dict
-        # Single category (no separators) -> return flat list
-        # No category -> search all products (with price filter if present)
-        if len(categories) > 1:
-            # Multi-category query: Search each category separately and return grouped results
-            grouped_results = {}
-            for category in categories:
-                category_results = self._search_by_category(query, category, price_filter, query_terms, k, sort_by, in_stock_only)
-                if category_results:
-                    # Return lowercase category keys to match chatbot.py's category_names mapping
-                    # This ensures proper display name lookup (e.g., 'home_garden', 'sports', 'clothing')
-                    grouped_results[category] = category_results
-            # Return dict only if we have results in multiple categories
-            if len(grouped_results) > 1:
-                return grouped_results
-            # If only one category has results, return as list for backward compatibility
-            elif len(grouped_results) == 1:
-                return list(grouped_results.values())[0]
-            else:
-                return []
-        
-        # Single category - filter by category and price
-        category_filter = categories[0] if categories else None
-        if category_filter:
-            return self._search_by_category(query, category_filter, price_filter, query_terms, k, sort_by, in_stock_only)
-        
-        # No category specified - search ALL products (with price filter if present)
-        # Score all products
+        # Unified retrieval: Single pass through all products
+        # Score all products once, then group by category if needed
         scored_products = []
+        
         for idx, product in enumerate(self.products):
             # Apply stock filter
             if in_stock_only and product.get('stock_status') == 'out_of_stock':
@@ -456,6 +561,31 @@ class HybridSearch:
                 if price < min_price or price > max_price:
                     continue
             
+            # Category matching: For multi-category, check if product matches ANY category
+            # For single category, check if it matches that category
+            # For no category, include all products
+            category_match = True
+            matched_categories = []
+            
+            if len(categories) > 1:
+                # Multi-category: Check if product matches any of the requested categories
+                for category in categories:
+                    if self._matches_category(product, category, query):
+                        category_match = True
+                        matched_categories.append(category)
+                        break
+                else:
+                    category_match = False
+            elif len(categories) == 1:
+                # Single category: Check if product matches the category
+                category_match = self._matches_category(product, categories[0], query)
+                if category_match:
+                    matched_categories = [categories[0]]
+            # else: no category filter, include all products (category_match = True)
+            
+            if not category_match:
+                continue
+            
             # Calculate relevance scores
             bm25_score = self._bm25_score(query_terms, idx)
             name_bonus = self._name_match_bonus(query_terms, product)
@@ -467,7 +597,8 @@ class HybridSearch:
                     'product': product,
                     'score': total_score,
                     'bm25_score': bm25_score,
-                    'name_bonus': name_bonus
+                    'name_bonus': name_bonus,
+                    'matched_categories': matched_categories if matched_categories else (categories if categories else [])
                 })
         
         # Sort results
@@ -478,6 +609,48 @@ class HybridSearch:
         else:
             scored_products.sort(key=lambda x: x['score'], reverse=True)
         
+        # Group by category for multi-category queries
+        if len(categories) > 1:
+            grouped_results = {}
+            # Initialize empty lists for each requested category
+            for cat in categories:
+                grouped_results[cat] = []
+            
+            for item in scored_products:
+                product = item['product']
+                # Only use matched_categories - products must match at least one requested category
+                product_categories = item.get('matched_categories', [])
+                
+                # Filter: only include categories that are in the requested categories list
+                product_categories = [cat for cat in product_categories if cat in categories]
+                
+                # If no match found, skip this product (strict filtering)
+                if not product_categories:
+                    continue
+                
+                # Add product to each matching category group
+                product_id = product.get('product_id') or product.get('name', '')
+                for cat in product_categories:
+                    # Deduplicate: check if product already in this category
+                    if not any((p.get('product_id') or p.get('name', '')) == product_id for p in grouped_results[cat]):
+                        grouped_results[cat].append(product)
+                        # Limit results per category
+                        if len(grouped_results[cat]) >= k:
+                            break
+            
+            # Limit results per category
+            for cat in grouped_results:
+                grouped_results[cat] = grouped_results[cat][:k]
+            
+            # Return dict only if we have results in multiple categories
+            if len(grouped_results) > 1:
+                return grouped_results
+            elif len(grouped_results) == 1:
+                return list(grouped_results.values())[0]
+            else:
+                return []
+        
+        # Single category or no category - return flat list
         return [item['product'] for item in scored_products[:k]]
     
     def _search_by_category(
@@ -681,6 +854,91 @@ class HybridSearch:
             p for p in self.products
             if min_price <= p.get('price', 0) <= max_price
         ]
+    
+    def merge_results(
+        self,
+        bm25_results: List[Dict],
+        vector_results: List[Dict],
+        bm25_weight: float = 0.6,
+        vector_weight: float = 0.4,
+        k: int = 10
+    ) -> List[Dict]:
+        """
+        Merge BM25 and vector search results with score fusion.
+        
+        Args:
+            bm25_results: List of products from BM25 search (with scores)
+            vector_results: List of products from vector search
+            bm25_weight: Weight for BM25 scores (default 0.6)
+            vector_weight: Weight for vector scores (default 0.4)
+            k: Number of final results to return
+            
+        Returns:
+            Merged and deduplicated list of products sorted by combined score
+        """
+        # Create a map of product_id -> merged result
+        merged = {}
+        
+        # Normalize BM25 scores (0-1 range)
+        bm25_scores = {}
+        if bm25_results:
+            max_bm25 = max(item.get('score', 0) for item in bm25_results if isinstance(item, dict) and 'score' in item)
+            if max_bm25 > 0:
+                for item in bm25_results:
+                    if isinstance(item, dict):
+                        product = item.get('product', item)  # Handle both formats
+                        product_id = product.get('product_id') or product.get('name', '')
+                        score = item.get('score', 0) / max_bm25
+                        bm25_scores[product_id] = score
+                        if product_id not in merged:
+                            merged[product_id] = product.copy()
+                            merged[product_id]['_bm25_score'] = score
+                            merged[product_id]['_vector_score'] = 0.0
+                    else:
+                        # Direct product dict
+                        product_id = item.get('product_id') or item.get('name', '')
+                        if product_id not in merged:
+                            merged[product_id] = item.copy()
+                            merged[product_id]['_bm25_score'] = 0.5  # Default score
+                            merged[product_id]['_vector_score'] = 0.0
+        
+        # Normalize vector scores (assume they come with similarity scores 0-1)
+        vector_scores = {}
+        if vector_results:
+            # Vector results should have similarity scores, but if not, assign based on position
+            for idx, product in enumerate(vector_results):
+                product_id = product.get('product_id') or product.get('name', '')
+                # If vector results have scores, use them; otherwise use position-based score
+                vector_score = product.get('similarity', product.get('score', 1.0 - (idx / len(vector_results))))
+                vector_scores[product_id] = vector_score
+                if product_id not in merged:
+                    merged[product_id] = product.copy()
+                    merged[product_id]['_bm25_score'] = 0.0
+                    merged[product_id]['_vector_score'] = vector_score
+                else:
+                    merged[product_id]['_vector_score'] = vector_score
+        
+        # Calculate combined scores and sort
+        scored_merged = []
+        for product_id, product in merged.items():
+            bm25_score = product.get('_bm25_score', 0.0)
+            vector_score = product.get('_vector_score', 0.0)
+            combined_score = (bm25_score * bm25_weight) + (vector_score * vector_weight)
+            
+            # Remove internal score fields
+            clean_product = {k: v for k, v in product.items() if not k.startswith('_')}
+            scored_merged.append({
+                'product': clean_product,
+                'combined_score': combined_score,
+                'bm25_score': bm25_score,
+                'vector_score': vector_score
+            })
+        
+        # Sort by combined score descending
+        scored_merged.sort(key=lambda x: x['combined_score'], reverse=True)
+        
+        # Return top k products
+        return [item['product'] for item in scored_merged[:k]]
 
 
 # Singleton instance

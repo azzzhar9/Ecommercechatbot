@@ -1,6 +1,7 @@
 """RAG Agent for product information retrieval."""
 
 import os
+from functools import lru_cache
 from typing import Dict, List, Optional, Tuple
 
 import chromadb
@@ -63,16 +64,68 @@ class RAGAgent:
         
         # Initialize cache
         self.search_cache = get_search_cache()
+        
+        # Initialize embedding cache (instance-level, max 512 entries)
+        self._embedding_cache = {}
+    
+    def _get_query_embedding(self, query: str, max_retries: int = 3) -> List[float]:
+        """
+        Get query embedding with caching.
+        
+        Args:
+            query: Search query
+            max_retries: Maximum retry attempts
+            
+        Returns:
+            Query embedding vector
+        """
+        # Normalize query for cache key
+        cache_key = query.lower().strip()
+        # Remove extra whitespace
+        cache_key = ' '.join(cache_key.split())
+        
+        # Check if we have a cached embedding
+        if cache_key in self._embedding_cache:
+            logger.debug(f"Embedding cache hit for query: {query[:50]}...")
+            return self._embedding_cache[cache_key]
+        
+        # Generate query embedding
+        retry_count = 0
+        while retry_count < max_retries:
+            try:
+                response = self.client.embeddings.create(
+                    model=self.embedding_model,
+                    input=[query]
+                )
+                query_embedding = response.data[0].embedding
+                # Cache the embedding (limit cache size to 512 entries)
+                if len(self._embedding_cache) >= 512:
+                    # Remove oldest entry (simple FIFO)
+                    oldest_key = next(iter(self._embedding_cache))
+                    del self._embedding_cache[oldest_key]
+                self._embedding_cache[cache_key] = query_embedding
+                logger.debug(f"Cached embedding for query: {query[:50]}...")
+                return query_embedding
+            except Exception as e:
+                retry_count += 1
+                if retry_count < max_retries:
+                    import time
+                    wait_time = 2 ** retry_count
+                    logger.warning(f"Embedding generation failed, retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"Failed to generate query embedding: {str(e)}", exc_info=True)
+                    raise
     
     def search_products(
         self,
         query: str,
-        k: int = 5,
+        k: int = 10,
         max_retries: int = 3,
         sort_by: str = 'relevance'
     ) -> List[Dict]:
         """
-        Search for products using hybrid BM25 + semantic search.
+        Search for products using hybrid BM25 + vector search with result fusion.
         
         Args:
             query: Search query
@@ -81,7 +134,7 @@ class RAGAgent:
             sort_by: Sort order ('relevance', 'price_low', 'price_high')
         
         Returns:
-            List of product dictionaries with metadata
+            List of product dictionaries with metadata, or Dict for multi-category results
         """
         # #region agent log
         import time
@@ -121,8 +174,68 @@ class RAGAgent:
         # #endregion
         category_filter = categories[0] if categories else None
         
-        # Use hybrid search engine (BM25 + semantic matching)
-        products = self.hybrid_search.search(query, k=k, sort_by=sort_by)
+        # Unified retrieval: BM25 search (single pass)
+        bm25_products = self.hybrid_search.search(query, k=k*2, sort_by=sort_by)  # Get more for merging
+        
+        # Vector search (semantic similarity)
+        try:
+            vector_products = self._vector_search(query, k=k*2, max_retries=max_retries)
+        except Exception as e:
+            logger.warning(f"Vector search failed: {e}, using BM25 results only")
+            vector_products = []
+        
+        # Merge BM25 and vector results
+        # Handle multi-category results (dict) vs single category (list)
+        if isinstance(bm25_products, dict):
+            # Multi-category: merge for each category
+            merged_results = {}
+            for category, category_products in bm25_products.items():
+                # Filter vector results for this category
+                category_vector_results = []
+                for vp in vector_products:
+                    # Check if vector product matches this category using the matches_category method
+                    try:
+                        if self.hybrid_search._matches_category(vp, category, query):
+                            category_vector_results.append(vp)
+                    except Exception as e:
+                        logger.debug(f"Error checking category match: {e}")
+                        # Fallback: check category field
+                        vp_category = vp.get('category', '').lower()
+                        if category.lower() in vp_category or vp_category in category.lower():
+                            category_vector_results.append(vp)
+                
+                # Merge BM25 and vector results for this category
+                if category_vector_results:
+                    try:
+                        merged_category = self.hybrid_search.merge_results(
+                            bm25_results=category_products,
+                            vector_results=category_vector_results,
+                            k=k
+                        )
+                        if merged_category:
+                            merged_results[category] = merged_category
+                    except Exception as e:
+                        logger.warning(f"Merge failed for category {category}: {e}, using BM25 results only")
+                        merged_results[category] = category_products[:k]
+                else:
+                    # No vector results for this category, use BM25 only
+                    merged_results[category] = category_products[:k]
+            
+            products = merged_results if merged_results else bm25_products
+        else:
+            # Single category or no category: merge flat lists
+            if vector_products:
+                try:
+                    products = self.hybrid_search.merge_results(
+                        bm25_results=bm25_products,
+                        vector_results=vector_products,
+                        k=k
+                    )
+                except Exception as e:
+                    logger.warning(f"Merge failed: {e}, using BM25 results only")
+                    products = bm25_products[:k] if isinstance(bm25_products, list) else bm25_products
+            else:
+                products = bm25_products[:k] if isinstance(bm25_products, list) else bm25_products
         
         # #region agent log
         search_end = time.time()
@@ -320,45 +433,38 @@ class RAGAgent:
         k: int = 3,
         max_retries: int = 3
     ) -> List[Dict]:
-        """Vector similarity search using embeddings."""
-        # Generate query embedding
-        retry_count = 0
-        while retry_count < max_retries:
-            try:
-                response = self.client.embeddings.create(
-                    model=self.embedding_model,
-                    input=[query]
-                )
-                query_embedding = response.data[0].embedding
-                break
-            except Exception as e:
-                retry_count += 1
-                if retry_count < max_retries:
-                    import time
-                    wait_time = 2 ** retry_count
-                    logger.warning(f"Embedding generation failed, retrying in {wait_time}s...")
-                    time.sleep(wait_time)
-                else:
-                    logger.error(f"Failed to generate query embedding: {str(e)}", exc_info=True)
-                    raise
+        """Vector similarity search using embeddings with caching."""
+        # Get cached or generate query embedding
+        query_embedding = self._get_query_embedding(query, max_retries)
         
         # Search vector store
         results = self.collection.query(
             query_embeddings=[query_embedding],
-            n_results=k
+            n_results=k,
+            include=['metadatas', 'documents', 'distances']
         )
         
-        # Format results
+        # Format results with similarity scores
         products = []
         if results['metadatas'] and len(results['metadatas']) > 0:
+            distances = results.get('distances', [[]])[0] if results.get('distances') else []
             for i, metadata in enumerate(results['metadatas'][0]):
+                # Convert distance to similarity score (1 - normalized distance)
+                # ChromaDB returns distances (lower is better), convert to similarity (higher is better)
+                distance = distances[i] if i < len(distances) else 1.0
+                # Normalize: similarity = 1 / (1 + distance) or 1 - normalized_distance
+                max_distance = max(distances) if distances else 1.0
+                similarity = 1.0 - (distance / max_distance) if max_distance > 0 else 1.0
+                
                 product = {
                     "product_id": metadata.get("product_id"),
                     "name": metadata.get("name"),
                     "description": results['documents'][0][i] if results.get('documents') else "",
                     "price": float(metadata.get("price", 0)),  # Get price from metadata
                     "category": metadata.get("category"),
-                    "stock_status": metadata.get("stock_status")
+                    "stock_status": metadata.get("stock_status"),
+                    "similarity": similarity,  # Add similarity score for merging
+                    "score": similarity  # Alias for compatibility
                 }
                 products.append(product)
         

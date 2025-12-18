@@ -1267,142 +1267,92 @@ Always use exact prices from search results."""
                             logger.info(f"Using formatted response from function results: {bot_response[:100]}...")
                         elif function_results:
                             # Multiple results or no response - aggregate all function results
+                            # With unified retrieval, we should rarely have multiple function calls for search
+                            # But handle it gracefully if it happens
                             if bot_response and len(function_results) > 1:
-                                # Reset bot_response to trigger aggregation for multi-category queries
+                                # Reset bot_response to trigger aggregation
                                 bot_response = None
-                                logger.info(f"Multiple function calls detected ({len(function_results)}), aggregating all results...")
-                            # Fallback: Aggregate all function results for multi-intent queries
-                            # Deduplicate category headers and product listings before formatting
-                            from collections import defaultdict, OrderedDict
+                                logger.info(f"Multiple function calls detected ({len(function_results)}), aggregating results...")
+                            
+                            # Simplified aggregation: rely on search engine's grouping
+                            # Only re-aggregate if we have multiple function calls without grouped results
+                            from collections import OrderedDict
                             category_to_products = OrderedDict()
                             product_ids_seen = set()
-                            for idx, result in enumerate(function_results):
+                            
+                            # Unified category display mapping (used by search engine and here)
+                            category_display_map = {
+                                "Home & Garden": "🏠 Home & Garden",
+                                "home & garden": "🏠 Home & Garden",
+                                "Home and Garden": "🏠 Home & Garden",
+                                "home and garden": "🏠 Home & Garden",
+                                "Sports": "⚽ Sports",
+                                "sports": "⚽ Sports",
+                                "sport": "⚽ Sports",
+                                "Clothing": "👕 Clothing",
+                                "clothing": "👕 Clothing",
+                                "clothes": "👕 Clothing",
+                                "Books": "📚 Books",
+                                "books": "📚 Books",
+                                "book": "📚 Books",
+                                "Electronics": "⚡ Electronics",
+                                "electronics": "⚡ Electronics",
+                                "Computers": "💻 Laptops & Computers",
+                                "computers": "💻 Laptops & Computers",
+                                "Phones": "📱 Phones",
+                                "phones": "📱 Phones",
+                                "Audio": "🎧 Audio & Headphones",
+                                "audio": "🎧 Audio & Headphones",
+                                "Gaming": "🎮 Gaming",
+                                "gaming": "🎮 Gaming",
+                                "Wearables": "⌚ Wearables",
+                                "wearables": "⌚ Wearables"
+                            }
+                            
+                            for result in function_results:
                                 if not result.get("success"):
                                     continue
-                                # If grouped by category, preserve the original category grouping from search
+                                
+                                # If already grouped by category, use the grouping directly
                                 if result.get("grouped_by_category") and result.get("products"):
-                                    # When results are already grouped by category, use the product's actual category from data
-                                    # Map with case-insensitive matching
-                                    category_display_map_grouped = {
-                                        "Home & Garden": "🏠 Home & Garden",
-                                        "home & garden": "🏠 Home & Garden",
-                                        "Home and Garden": "🏠 Home & Garden",
-                                        "home and garden": "🏠 Home & Garden",
-                                        "Sports": "⚽ Sports",
-                                        "sports": "⚽ Sports",
-                                        "sport": "⚽ Sports",
-                                        "Clothing": "👕 Clothing",
-                                        "clothing": "👕 Clothing",
-                                        "clothes": "👕 Clothing",
-                                        "Books": "📚 Books",
-                                        "books": "📚 Books",
-                                        "book": "📚 Books",
-                                        "Electronics": "⚡ Electronics",
-                                        "electronics": "⚡ Electronics"
-                                    }
+                                    # Search engine already grouped these - use product's category field
                                     for p in result["products"]:
                                         pid = p.get("product_id")
-                                        if pid in product_ids_seen:
+                                        if pid and pid in product_ids_seen:
                                             continue
-                                        # Use the product's actual category from the data
-                                        original_category = p.get("category")
-                                        # Try exact match first, then case-insensitive
-                                        label = category_display_map_grouped.get(original_category) or category_display_map_grouped.get(original_category.lower() if original_category else "") or "⚡ Electronics"
+                                        original_category = p.get("category", "")
+                                        # Map category to display name
+                                        label = category_display_map.get(original_category) or category_display_map.get(original_category.lower() if original_category else "") or "⚡ Electronics"
                                         if label not in category_to_products:
                                             category_to_products[label] = []
                                         category_to_products[label].append(p)
-                                        product_ids_seen.add(pid)
+                                        if pid:
+                                            product_ids_seen.add(pid)
                                     continue
-                                # If single/multi product result, group by product's actual category from data
-                                elif result.get("products") is not None:
+                                
+                                # If products list (not grouped), group by product's category field
+                                if result.get("products"):
                                     products = result["products"]
-                                    if isinstance(products, list) and len(products) > 0:
-                                        # Use product's actual category from data instead of re-categorizing
-                                        # Map with case-insensitive matching and handle variations
-                                        category_display_map = {
-                                            "Home & Garden": "🏠 Home & Garden",
-                                            "home & garden": "🏠 Home & Garden",
-                                            "Home and Garden": "🏠 Home & Garden",
-                                            "home and garden": "🏠 Home & Garden",
-                                            "Sports": "⚽ Sports",
-                                            "sports": "⚽ Sports",
-                                            "sport": "⚽ Sports",
-                                            "Clothing": "👕 Clothing",
-                                            "clothing": "👕 Clothing",
-                                            "clothes": "👕 Clothing",
-                                            "Books": "📚 Books",
-                                            "books": "📚 Books",
-                                            "book": "📚 Books",
-                                            "Electronics": "⚡ Electronics",
-                                            "electronics": "⚡ Electronics",
-                                            "Computers": "💻 Laptops & Computers",
-                                            "computers": "💻 Laptops & Computers",
-                                            "Phones": "📱 Phones",
-                                            "phones": "📱 Phones",
-                                            "Audio": "🎧 Audio & Headphones",
-                                            "audio": "🎧 Audio & Headphones",
-                                            "Gaming": "🎮 Gaming",
-                                            "gaming": "🎮 Gaming",
-                                            "Wearables": "⌚ Wearables",
-                                            "wearables": "⌚ Wearables"
-                                        }
-                                        
-                                        # Fallback category inference from product name/description
-                                        def infer_category_from_product(p):
-                                            """Infer category from product name/description if category field is missing."""
-                                            pname = p.get("name", "").lower()
-                                            pdesc = p.get("description", "").lower()
-                                            
-                                            # Home & Garden keywords
-                                            if any(kw in pname or kw in pdesc for kw in ["vacuum", "roomba", "dyson", "instant pot", "nespresso", "philips hue", "appliance", "kitchen"]):
-                                                return "🏠 Home & Garden"
-                                            # Sports keywords
-                                            if any(kw in pname or kw in pdesc for kw in ["peloton", "yoga", "mat", "dumbbell", "water bottle", "fitness", "gym", "running", "bike"]):
-                                                return "⚽ Sports"
-                                            # Clothing keywords
-                                            if any(kw in pname or kw in pdesc for kw in ["nike", "adidas", "levi", "patagonia", "north face", "sneakers", "jeans", "jacket", "sweater", "shoes"]):
-                                                return "👕 Clothing"
-                                            # Books keywords (exclude MacBook, notebook)
-                                            if any(kw in pname or kw in pdesc for kw in ["book", "novel", "reading"]) and not any(ex in pname for ex in ["macbook", "notebook", "kindle"]):
-                                                return "📚 Books"
-                                            # Default to Electronics
-                                            return "⚡ Electronics"
-                                        
+                                    if isinstance(products, list):
                                         for p in products:
                                             pid = p.get("product_id")
-                                            if pid in product_ids_seen:
+                                            if pid and pid in product_ids_seen:
                                                 continue
-                                            # Use the product's actual category from the data
-                                            original_category = p.get("category")
-                                            
-                                            # Debug logging to see what category values we're getting
-                                            if not original_category:
-                                                logger.warning(f"Product {p.get('name', 'Unknown')} missing category field, inferring from name/description")
-                                            
-                                            # Try exact match first
-                                            label = category_display_map.get(original_category)
-                                            
-                                            # If not found, try case-insensitive match
-                                            if not label and original_category:
-                                                label = category_display_map.get(original_category.lower())
-                                            
-                                            # If still not found, infer from product details
-                                            if not label:
-                                                label = infer_category_from_product(p)
-                                                logger.debug(f"Inferred category {label} for product {p.get('name', 'Unknown')} (original_category: {original_category})")
-                                            
+                                            original_category = p.get("category", "")
+                                            # Map category to display name
+                                            label = category_display_map.get(original_category) or category_display_map.get(original_category.lower() if original_category else "") or "⚡ Electronics"
                                             if label not in category_to_products:
                                                 category_to_products[label] = []
                                             category_to_products[label].append(p)
-                                            product_ids_seen.add(pid)
-                                else:
-                                    # Check for non-product results (cart, orders, etc.)
-                                    if result.get("result") and not result.get("products"):
-                                        # This is a cart/order operation - store it for later
-                                        if not hasattr(self, '_non_product_results'):
-                                            self._non_product_results = []
-                                        self._non_product_results.append(result.get("result"))
+                                            if pid:
+                                                product_ids_seen.add(pid)
                                     continue
+                                
+                                # Non-product results (cart, orders, etc.)
+                                if result.get("result") and not result.get("products"):
+                                    if not hasattr(self, '_non_product_results'):
+                                        self._non_product_results = []
+                                    self._non_product_results.append(result.get("result"))
                             
                             # Now format the deduplicated response
                             bot_response_parts = []
