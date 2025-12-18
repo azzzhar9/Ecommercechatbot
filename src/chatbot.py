@@ -230,13 +230,13 @@ class EcommerceChatbot:
                 "type": "function",
                 "function": {
                     "name": "search_products",
-                    "description": "Search for products by name, category, or description. Use this when the user asks about product information, prices, or availability. Supports filters like 'laptops under $1000' or 'cheap phones'.",
+                    "description": "Search for products by name, category, or description. Use this when the user asks about product information, prices, or availability. Supports filters like 'laptops under $1000' or 'cheap phones'. For multi-category queries (e.g., 'books, garden and sports' or 'Home,Sports and clothing'), pass the ENTIRE query as a single function call - do NOT split into multiple calls. The search engine will automatically detect and group results by category.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "query": {
                                 "type": "string",
-                                "description": "Search query for products (e.g., 'iPhone', 'laptops under $1000', 'cheap phones')"
+                                "description": "Search query for products (e.g., 'iPhone', 'laptops under $1000', 'cheap phones', 'books, garden and sports'). For multi-category queries, include the full query with all categories."
                             },
                             "sort_by": {
                                 "type": "string",
@@ -450,11 +450,32 @@ class EcommerceChatbot:
                         'audio': '🎧 Audio & Headphones',
                         'gaming': '🎮 Gaming',
                         'wearables': '⌚ Wearables',
-                        'electronics': '⚡ Electronics'
+                        'electronics': '⚡ Electronics',
+                        'home_garden': '🏠 Home & Garden',
+                        'sports': '⚽ Sports',
+                        'clothing': '👕 Clothing'
                     }
                     for category, category_products in products.items():
                         if category_products:
-                            display_name = category_names.get(category, category.title())
+                            # Normalize category key to lowercase to match category_names mapping
+                            # Handle variations like 'Clothing', 'CLOTHING', 'home_garden', 'Home_garden', etc.
+                            category_normalized = category.lower().strip()
+                            # Also handle special cases like 'Home & Garden' -> 'home_garden'
+                            if 'home' in category_normalized and 'garden' in category_normalized:
+                                category_normalized = 'home_garden'
+                            elif category_normalized == 'clothing':
+                                category_normalized = 'clothing'
+                            elif category_normalized == 'sports':
+                                category_normalized = 'sports'
+                            
+                            display_name = category_names.get(category_normalized, category.title())
+                            # #region agent log
+                            try:
+                                import json
+                                with open(r'e:\AIFinalProject\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                                    f.write(json.dumps({"id":f"log_category_display","timestamp":int(__import__('time').time()*1000),"location":"chatbot.py:456","message":"Displaying category","data":{"category":category,"category_normalized":category_normalized,"display_name":display_name,"product_count":len(category_products)},"sessionId":"debug-session","runId":"run2","hypothesisId":"A"}) + '\n')
+                            except: pass
+                            # #endregion
                             result_text += f"**{display_name}:**\n"
                             for i, p in enumerate(category_products, 1):
                                 stock_msg = "in stock" if p['stock_status'] == "in_stock" else f"{p['stock_status']}"
@@ -1151,6 +1172,13 @@ Always use exact prices from search results."""
                                 elif result.get("products"):
                                     products = result["products"]
                                     if products:
+                                        # If the user query is a stock/inventory request, show all products, not just 5
+                                        user_query = self.chat_history[-1]["content"].lower() if self.chat_history else ""
+                                        show_all_stock = any(
+                                            kw in user_query for kw in [
+                                                "show me all stock", "show all stock", "all stock", "show me the stock", "stock information", "inventory", "all products", "list all products"
+                                            ]
+                                        )
                                         if len(products) == 1:
                                             product = products[0]
                                             stock_msg = "in stock" if product['stock_status'] == "in_stock" else f"{product['stock_status']}"
@@ -1160,11 +1188,15 @@ Always use exact prices from search results."""
                                             )
                                         else:
                                             response_parts = [f"I found {len(products)} product(s):\n\n"]
-                                            for i, product in enumerate(products[:5], 1):
+                                            # Show all products for stock queries, else show only 5
+                                            display_products = products if show_all_stock else products[:5]
+                                            for i, product in enumerate(display_products, 1):
                                                 stock_msg = "in stock" if product['stock_status'] == "in_stock" else f"{product['stock_status']}"
                                                 response_parts.append(
                                                     f"{i}. {product['name']} - ${product['price']:.2f} ({stock_msg})\n"
                                                 )
+                                            if not show_all_stock and len(products) > 5:
+                                                response_parts.append(f"...and {len(products) - 5} more. Ask for 'all stock' to see everything.\n")
                                             bot_response = "".join(response_parts)
                                     else:
                                         # Check if this was a filtered search (category + price)
@@ -1224,7 +1256,13 @@ Always use exact prices from search results."""
                         
                         # If we have a response from function results, use it (skip slow LLM call for faster response)
                         # BUT: If multiple function calls were made (multi-category query), aggregate all results
-                        if bot_response and len(function_results) == 1:
+                        # Check if result has grouped_by_category - if so, use the pre-formatted result directly
+                        has_grouped_category = any(r.get("grouped_by_category") for r in function_results if r.get("success") and r.get("result"))
+                        if has_grouped_category and len(function_results) == 1:
+                            # Single grouped result - use it directly without re-categorization
+                            bot_response = function_results[0].get("result")
+                            logger.info("Using pre-formatted grouped category result directly")
+                        elif bot_response and len(function_results) == 1:
                             # Single result - use formatted response directly
                             logger.info(f"Using formatted response from function results: {bot_response[:100]}...")
                         elif function_results:
@@ -1241,55 +1279,121 @@ Always use exact prices from search results."""
                             for idx, result in enumerate(function_results):
                                 if not result.get("success"):
                                     continue
-                                # If grouped by category, parse the result string to extract products (skip for now)
+                                # If grouped by category, preserve the original category grouping from search
                                 if result.get("grouped_by_category") and result.get("products"):
-                                    # Add products to deduplication logic
+                                    # When results are already grouped by category, use the product's actual category from data
+                                    # Map with case-insensitive matching
+                                    category_display_map_grouped = {
+                                        "Home & Garden": "🏠 Home & Garden",
+                                        "home & garden": "🏠 Home & Garden",
+                                        "Home and Garden": "🏠 Home & Garden",
+                                        "home and garden": "🏠 Home & Garden",
+                                        "Sports": "⚽ Sports",
+                                        "sports": "⚽ Sports",
+                                        "sport": "⚽ Sports",
+                                        "Clothing": "👕 Clothing",
+                                        "clothing": "👕 Clothing",
+                                        "clothes": "👕 Clothing",
+                                        "Books": "📚 Books",
+                                        "books": "📚 Books",
+                                        "book": "📚 Books",
+                                        "Electronics": "⚡ Electronics",
+                                        "electronics": "⚡ Electronics"
+                                    }
                                     for p in result["products"]:
                                         pid = p.get("product_id")
                                         if pid in product_ids_seen:
                                             continue
-                                        label = p.get("category_label") or p.get("category") or "Other"
+                                        # Use the product's actual category from the data
+                                        original_category = p.get("category")
+                                        # Try exact match first, then case-insensitive
+                                        label = category_display_map_grouped.get(original_category) or category_display_map_grouped.get(original_category.lower() if original_category else "") or "⚡ Electronics"
                                         if label not in category_to_products:
                                             category_to_products[label] = []
                                         category_to_products[label].append(p)
                                         product_ids_seen.add(pid)
                                     continue
-                                # If single/multi product result, group by refined category and label each group
+                                # If single/multi product result, group by product's actual category from data
                                 elif result.get("products") is not None:
                                     products = result["products"]
                                     if isinstance(products, list) and len(products) > 0:
-                                        # Refined category mapping by product name/description, with improved phone logic and deduplication across all groups
-                                        refined_category_map = [
-                                            ("💻 Laptops", ["laptop", "macbook", "notebook", "xps", "dell"], ["notebook"], []),
-                                            ("📱 Phones", ["phone", "iphone", "samsung", "galaxy", "smartphone", "mobile", "cellphone"], ["headphone", "earbud", "airpod", "speaker", "audio", "book", "novel", "reading"], []),
-                                            ("🎧 Audio & Headphones", ["headphone", "earbud", "airpod", "audio", "sound", "speaker"], ["phone", "mobile", "cellphone", "book", "novel", "reading"], []),
-                                            ("⌚ Wearables", ["watch", "smartwatch", "fitness", "tracker", "wearable"], [], []),
-                                            ("🎮 Gaming", ["playstation", "xbox", "nintendo", "console", "controller", "switch", "ps5", "gaming"], ["laptop", "macbook", "computer", "xps", "dell", "book", "novel", "reading"], []),
-                                            ("📚 Books", ["book", "novel", "reading"], ["macbook", "notebook", "laptop", "phone", "mobile", "cellphone"], []),
-                                            ("⚡ Electronics", ["electronics", "ipad", "tablet", "display", "monitor", "tv"], [], [])
-                                        ]
+                                        # Use product's actual category from data instead of re-categorizing
+                                        # Map with case-insensitive matching and handle variations
+                                        category_display_map = {
+                                            "Home & Garden": "🏠 Home & Garden",
+                                            "home & garden": "🏠 Home & Garden",
+                                            "Home and Garden": "🏠 Home & Garden",
+                                            "home and garden": "🏠 Home & Garden",
+                                            "Sports": "⚽ Sports",
+                                            "sports": "⚽ Sports",
+                                            "sport": "⚽ Sports",
+                                            "Clothing": "👕 Clothing",
+                                            "clothing": "👕 Clothing",
+                                            "clothes": "👕 Clothing",
+                                            "Books": "📚 Books",
+                                            "books": "📚 Books",
+                                            "book": "📚 Books",
+                                            "Electronics": "⚡ Electronics",
+                                            "electronics": "⚡ Electronics",
+                                            "Computers": "💻 Laptops & Computers",
+                                            "computers": "💻 Laptops & Computers",
+                                            "Phones": "📱 Phones",
+                                            "phones": "📱 Phones",
+                                            "Audio": "🎧 Audio & Headphones",
+                                            "audio": "🎧 Audio & Headphones",
+                                            "Gaming": "🎮 Gaming",
+                                            "gaming": "🎮 Gaming",
+                                            "Wearables": "⌚ Wearables",
+                                            "wearables": "⌚ Wearables"
+                                        }
+                                        
+                                        # Fallback category inference from product name/description
+                                        def infer_category_from_product(p):
+                                            """Infer category from product name/description if category field is missing."""
+                                            pname = p.get("name", "").lower()
+                                            pdesc = p.get("description", "").lower()
+                                            
+                                            # Home & Garden keywords
+                                            if any(kw in pname or kw in pdesc for kw in ["vacuum", "roomba", "dyson", "instant pot", "nespresso", "philips hue", "appliance", "kitchen"]):
+                                                return "🏠 Home & Garden"
+                                            # Sports keywords
+                                            if any(kw in pname or kw in pdesc for kw in ["peloton", "yoga", "mat", "dumbbell", "water bottle", "fitness", "gym", "running", "bike"]):
+                                                return "⚽ Sports"
+                                            # Clothing keywords
+                                            if any(kw in pname or kw in pdesc for kw in ["nike", "adidas", "levi", "patagonia", "north face", "sneakers", "jeans", "jacket", "sweater", "shoes"]):
+                                                return "👕 Clothing"
+                                            # Books keywords (exclude MacBook, notebook)
+                                            if any(kw in pname or kw in pdesc for kw in ["book", "novel", "reading"]) and not any(ex in pname for ex in ["macbook", "notebook", "kindle"]):
+                                                return "📚 Books"
+                                            # Default to Electronics
+                                            return "⚡ Electronics"
+                                        
                                         for p in products:
                                             pid = p.get("product_id")
                                             if pid in product_ids_seen:
                                                 continue
-                                            pname = p.get("name", "").lower()
-                                            pdesc = p.get("description", "").lower()
-                                            assigned = False
-                                            for label, keywords, exclude_keywords, must_not_have in refined_category_map:
-                                                if any(ex_kw in pname or ex_kw in pdesc for ex_kw in exclude_keywords):
-                                                    continue
-                                                if must_not_have and any(mnh in pname or mnh in pdesc for mnh in must_not_have):
-                                                    continue
-                                                if any(kw in pname or kw in pdesc for kw in keywords):
-                                                    if label not in category_to_products:
-                                                        category_to_products[label] = []
-                                                    category_to_products[label].append(p)
-                                                    assigned = True
-                                                    break
-                                            if not assigned:
-                                                if "⚡ Electronics" not in category_to_products:
-                                                    category_to_products["⚡ Electronics"] = []
-                                                category_to_products["⚡ Electronics"].append(p)
+                                            # Use the product's actual category from the data
+                                            original_category = p.get("category")
+                                            
+                                            # Debug logging to see what category values we're getting
+                                            if not original_category:
+                                                logger.warning(f"Product {p.get('name', 'Unknown')} missing category field, inferring from name/description")
+                                            
+                                            # Try exact match first
+                                            label = category_display_map.get(original_category)
+                                            
+                                            # If not found, try case-insensitive match
+                                            if not label and original_category:
+                                                label = category_display_map.get(original_category.lower())
+                                            
+                                            # If still not found, infer from product details
+                                            if not label:
+                                                label = infer_category_from_product(p)
+                                                logger.debug(f"Inferred category {label} for product {p.get('name', 'Unknown')} (original_category: {original_category})")
+                                            
+                                            if label not in category_to_products:
+                                                category_to_products[label] = []
+                                            category_to_products[label].append(p)
                                             product_ids_seen.add(pid)
                                 else:
                                     # Check for non-product results (cart, orders, etc.)
@@ -1309,9 +1413,42 @@ Always use exact prices from search results."""
                                 delattr(self, '_non_product_results')
                             
                             # Add product results
-                            for label, group_products in category_to_products.items():
+                            # Only include categories that were requested in the query
+                            # Map query to extracted categories (normalized)
+                            requested_categories = []
+                            if hasattr(self, 'last_query') and self.last_query:
+                                from src.search import HybridSearch
+                                requested_categories = HybridSearch()._extract_categories(self.last_query)
+                            # Normalize category keys
+                            def normalize(cat):
+                                return cat.strip().replace(' ', '_').lower()
+                            # Map to display labels
+                            label_map = {
+                                'clothing': '👕 Clothing',
+                                'sports': '⚽ Sports',
+                                'home_garden': '🏠 Home & Garden',
+                                'books': '📚 Books',
+                                'phones': '📱 Phones',
+                                'computers': '💻 Laptops',
+                                'audio': '🎧 Audio & Headphones',
+                                'gaming': '🎮 Gaming',
+                                'wearables': '⌚ Wearables',
+                                'electronics': '⚡ Electronics'
+                            }
+                            # Only show requested categories, in order, with fallback for missing
+                            any_found = False
+                            for cat in requested_categories:
+                                norm_cat = normalize(cat)
+                                label = label_map.get(norm_cat, cat.capitalize())
+                                group_products = category_to_products.get(label, [])
                                 if not group_products:
+                                    # Try fallback: check for label with different case or spaces
+                                    alt_label = label_map.get(cat.lower(), cat.capitalize())
+                                    group_products = category_to_products.get(alt_label, [])
+                                if not group_products:
+                                    bot_response_parts.append(f"**{label}:**\nNo products found for this category.\n")
                                     continue
+                                any_found = True
                                 if len(group_products) == 1:
                                     product = group_products[0]
                                     stock_msg = "in stock" if product['stock_status'] == "in_stock" else f"{product['stock_status']}"
@@ -1322,12 +1459,14 @@ Always use exact prices from search results."""
                                 else:
                                     header = f"**{label}:**\n"
                                     response_parts = [header + f"I found {len(group_products)} product(s):\n\n"]
-                                    for i, product in enumerate(group_products[:5], 1):
+                                    for i, product in enumerate(group_products, 1):
                                         stock_msg = "in stock" if product['stock_status'] == "in_stock" else f"{product['stock_status']}"
                                         response_parts.append(
                                             f"{i}. {product['name']} - ${product['price']:.2f} ({stock_msg})\n"
                                         )
                                     bot_response_parts.append("".join(response_parts))
+                            if not any_found:
+                                bot_response_parts.append("No products found for any of the requested categories. Please try different keywords.")
                             
                             bot_response = "\n\n".join(bot_response_parts) if bot_response_parts else None
                             
@@ -1409,7 +1548,6 @@ Always use exact prices from search results."""
                 except Exception as e:
                     retry_count += 1
                     if retry_count < max_retries:
-                        import time
                         wait_time = 2 ** retry_count
                         logger.warning(f"API call failed, retrying in {wait_time}s... ({retry_count}/{max_retries})")
                         time.sleep(wait_time)

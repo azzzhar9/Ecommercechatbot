@@ -153,7 +153,7 @@ class ShoppingCart:
             self.discount_percent = self.COUPON_CODES[code_upper]
             self.updated_at = datetime.now()
             return True, f"Coupon applied! {self.discount_percent}% discount"
-        return False, "Invalid coupon code"
+        return False, f"Invalid coupon code. Valid codes: {', '.join(self.COUPON_CODES.keys())}"
     
     @property
     def subtotal(self) -> float:

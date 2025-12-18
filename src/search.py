@@ -175,6 +175,13 @@ class HybridSearch:
     
     def _extract_categories(self, query: str) -> List[str]:
         """Extract multiple categories from query with support for comma/and-separated lists. STRICT for price queries."""
+        # #region agent log
+        try:
+            import json
+            with open(r'e:\AIFinalProject\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"id":f"log_extract_cat_start","timestamp":int(__import__('time').time()*1000),"location":"search.py:177","message":"_extract_categories START","data":{"query":query},"sessionId":"debug-session","runId":"run1","hypothesisId":"A"}) + '\n')
+        except: pass
+        # #endregion
         query_lower = query.lower()
         categories = {
             'phones': ['phone', 'phones', 'mobile', 'mobiles', 'smartphone', 'cellphone', 'iphone', 'iphones', 'samsung', 'galaxy'],
@@ -184,11 +191,16 @@ class HybridSearch:
             'wearables': ['wearable', 'watch', 'fitness', 'tracker'],
             'books': ['book', 'books', 'novel', 'novels', 'reading'],
             'electronics': ['electronics', 'electronic', 'tech', 'gadget'],
+            'home_garden': ['garden', 'gardening', 'home', 'home & garden', 'home and garden', 'household', 'appliance', 'vacuum', 'kitchen', 'home garden'],
+            'clothing': ['clothing', 'clothes', 'apparel', 'wear', 'fashion', 'shoes', 'sneakers', 'jeans', 'jacket'],
+            'sports': ['sports', 'sport', 'fitness', 'exercise', 'workout', 'gym', 'yoga', 'running'],
         }
-        # Remove common words
+        # Remove common words and clean up query
         query_clean = query_lower.strip()
-        for remove_word in ['show me', 'i want', 'show', 'give me', 'find', 'search for', 'looking for']:
+        for remove_word in ['show me', 'i want', 'show', 'give me', 'find', 'search for', 'looking for', 'stock']:
             query_clean = query_clean.replace(remove_word, '').strip()
+        # Remove extra whitespace
+        query_clean = ' '.join(query_clean.split())
         segments = []
         has_comma = ',' in query_clean
         has_and = ' and ' in query_clean
@@ -237,22 +249,44 @@ class HybridSearch:
                 if segment_matched:
                     break
             if not segment_matched:
+                # #region agent log
+                try:
+                    import json
+                    with open(r'e:\AIFinalProject\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                        f.write(json.dumps({"id":f"log_segment_not_matched","timestamp":int(__import__('time').time()*1000),"location":"search.py:242","message":"Segment not matched, checking words","data":{"segment":segment,"words":words},"sessionId":"debug-session","runId":"run1","hypothesisId":"B"}) + '\n')
+                except: pass
+                # #endregion
                 for word in words:
-                    word = word.strip()
+                    word = word.strip().lower()  # Ensure lowercase for consistent matching
                     if not word:
                         continue
                     word_normalized = word.rstrip('s') if word.endswith('s') and len(word) > 3 else word
                     for category, keywords in categories.items():
                         if category == 'books' and not is_explicit_book_segment(word):
                             continue
-                        # Exact match
+                        # Exact match (case-insensitive)
                         if word in keywords or word_normalized in keywords:
+                            # #region agent log
+                            try:
+                                import json
+                                with open(r'e:\AIFinalProject\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                                    f.write(json.dumps({"id":f"log_word_matched","timestamp":int(__import__('time').time()*1000),"location":"search.py:252","message":"Word matched category","data":{"word":word,"category":category},"sessionId":"debug-session","runId":"run1","hypothesisId":"B"}) + '\n')
+                            except: pass
+                            # #endregion
                             if category not in found_categories:
                                 found_categories.append(category)
                             break
                         # Check if any keyword contains the word (handles "accessories" matching "gaming accessories")
+                        # Also check if word matches keyword (handles "garden" matching "garden" in home_garden keywords)
                         for keyword in keywords:
-                            if word in keyword or keyword in word:
+                            keyword_lower = keyword.lower()
+                            if word == keyword_lower or word_normalized == keyword_lower:
+                                if category == 'books' and not is_explicit_book_segment(word):
+                                    continue
+                                if category not in found_categories:
+                                    found_categories.append(category)
+                                break
+                            if word in keyword_lower or keyword_lower in word:
                                 if category == 'books' and not is_explicit_book_segment(word):
                                     continue
                                 if category not in found_categories:
@@ -261,12 +295,20 @@ class HybridSearch:
                         # Prefix match for longer words
                         if len(word) >= 4:
                             for keyword in keywords:
-                                if keyword.startswith(word):
+                                keyword_lower = keyword.lower()
+                                if keyword_lower.startswith(word) or word.startswith(keyword_lower):
                                     if category == 'books' and not is_explicit_book_segment(word):
                                         continue
                                     if category not in found_categories:
                                         found_categories.append(category)
                                     break
+        # #region agent log
+        try:
+            import json
+            with open(r'e:\AIFinalProject\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"id":f"log_extract_cat_segments","timestamp":int(__import__('time').time()*1000),"location":"search.py:280","message":"_extract_categories segments","data":{"segments":segments,"found_categories":found_categories},"sessionId":"debug-session","runId":"run1","hypothesisId":"A"}) + '\n')
+        except: pass
+        # #endregion
         # Fallback: if no categories found in segments, check whole query
         # For price queries, still try to find categories but be more careful
         if not found_categories:
@@ -290,6 +332,13 @@ class HybridSearch:
                             found_categories.append(category)
                         break
         
+        # #region agent log
+        try:
+            import json
+            with open(r'e:\AIFinalProject\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"id":f"log_extract_cat_end","timestamp":int(__import__('time').time()*1000),"location":"search.py:324","message":"_extract_categories END","data":{"found_categories":found_categories},"sessionId":"debug-session","runId":"run1","hypothesisId":"A"}) + '\n')
+        except: pass
+        # #endregion
         return found_categories if found_categories else []
     
     def _extract_category(self, query: str) -> Optional[str]:
@@ -375,6 +424,8 @@ class HybridSearch:
             for category in categories:
                 category_results = self._search_by_category(query, category, price_filter, query_terms, k, sort_by, in_stock_only)
                 if category_results:
+                    # Return lowercase category keys to match chatbot.py's category_names mapping
+                    # This ensures proper display name lookup (e.g., 'home_garden', 'sports', 'clothing')
                     grouped_results[category] = category_results
             # Return dict only if we have results in multiple categories
             if len(grouped_results) > 1:
@@ -494,6 +545,33 @@ class HybridSearch:
                     has_book_keyword = any(kw in product_name or kw in product_desc for kw in book_keywords)
                     is_excluded = any(kw in product_name for kw in exclude_keywords)
                     category_match = has_book_keyword and not is_excluded
+            elif category_filter == 'home_garden':
+                # Match products with "Home & Garden" category (exact match or contains both words)
+                # Handle variations: "home & garden", "home and garden", "home garden"
+                category_match = (
+                    ('home' in product_category and 'garden' in product_category) or 
+                    product_category == 'home & garden' or
+                    product_category == 'home and garden' or
+                    product_category == 'home garden'
+                )
+                # Also match common home/garden keywords
+                if not category_match:
+                    home_keywords = ['vacuum', 'appliance', 'coffee', 'kitchen', 'roomba', 'dyson', 'instant pot', 'nespresso', 'philips hue']
+                    category_match = any(kw in product_name or kw in product_desc for kw in home_keywords)
+            elif category_filter == 'clothing':
+                # Match products with "Clothing" category (case-insensitive)
+                category_match = 'clothing' in product_category.lower()
+                # Also match common clothing keywords
+                if not category_match:
+                    clothing_keywords = ['shoes', 'sneakers', 'jeans', 'jacket', 'sweater', 'nike', 'adidas', 'levi', 'patagonia', 'north face']
+                    category_match = any(kw in product_name.lower() or kw in product_desc.lower() for kw in clothing_keywords)
+            elif category_filter == 'sports':
+                # Match products with "Sports" category (case-insensitive)
+                category_match = 'sport' in product_category.lower()
+                # Also match common sports keywords (exclude 'garmin', 'fitbit' to avoid wearables being shown as separate)
+                if not category_match:
+                    sports_keywords = ['yoga', 'mat', 'fitness', 'gym', 'running', 'bike', 'peloton', 'water bottle', 'dumbbell']
+                    category_match = any(kw in product_name.lower() or kw in product_desc.lower() for kw in sports_keywords)
             
             if not category_match:
                 continue

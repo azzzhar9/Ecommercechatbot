@@ -113,6 +113,12 @@ class RAGAgent:
         # Extract filters before search (for fallback if needed)
         price_filter = self.hybrid_search._extract_price_filter(query)
         categories = self.hybrid_search._extract_categories(query)
+        # #region agent log
+        try:
+            with open(r'e:\AIFinalProject\.cursor\debug.log', 'a', encoding='utf-8') as f:
+                f.write(json.dumps({"id":f"log_categories_extracted","timestamp":int(time.time()*1000),"location":"rag_agent.py:115","message":"Categories extracted from query","data":{"query":query,"categories":categories},"sessionId":"debug-session","runId":"run1","hypothesisId":"A"}) + '\n')
+        except: pass
+        # #endregion
         category_filter = categories[0] if categories else None
         
         # Use hybrid search engine (BM25 + semantic matching)
