@@ -536,28 +536,73 @@ with tab2:
         # Display chat messages
         for message in st.session_state.messages:
             with st.chat_message(message["role"], avatar="🧑" if message["role"] == "user" else "🤖"):
-                st.markdown(message["content"])
+                # Clean response display - ensure no raw JSON or debug output
+                content = message["content"]
+                # Remove any potential JSON artifacts or debug logs if they somehow got through
+                if content and not content.startswith("{") and not content.startswith("["):
+                    st.markdown(content)
+                else:
+                    # Fallback: show error message if content is malformed
+                    st.error("Response format error. Please try again.")
 
     # Chat input
     if prompt := st.chat_input("Ask about products or place an order..."):
+        # One Action per Message: Prevent re-execution on UI reruns
+        # Check if this message is already being processed
+        if 'processing_message' not in st.session_state:
+            st.session_state.processing_message = None
+        
+        # If already processing this message, skip
+        if st.session_state.processing_message == prompt:
+            st.stop()
+        
+        # Mark message as being processed
+        st.session_state.processing_message = prompt
+        
         # Add user message to session state
         st.session_state.messages.append({"role": "user", "content": prompt})
         
-        # Get bot response
-        try:
-            response = st.session_state.chatbot.handle_message(prompt)
-            
-            # Check if order was created
-            if "order" in response.lower() and ("confirmed" in response.lower() or "created" in response.lower() or "ORD-" in response):
-                st.session_state.order_count += 1
-            
-        except Exception as e:
-            response = f"Sorry, I encountered an error: {str(e)}"
+        # Create placeholder for progressive rendering (using st.empty() as recommended)
+        response_placeholder = st.empty()
         
-        # Add assistant message to session state
+        # Step 1: Show initial feedback using placeholder
+        with response_placeholder.container():
+            with st.chat_message("assistant", avatar="🤖"):
+                st.markdown("🤖 Thinking...")
+        
+        # Step 2: Get bot response with spinner
+        # IMPORTANT: Spinner wraps ONLY the backend call, NOT UI rendering
+        # UI rendering happens after spinner completes
+        with st.spinner("Searching products..."):
+            try:
+                response = st.session_state.chatbot.handle_message(prompt)
+                
+                # Check if order was created
+                if "order" in response.lower() and ("confirmed" in response.lower() or "created" in response.lower() or "ORD-" in response):
+                    st.session_state.order_count += 1
+                
+            except Exception as e:
+                response = f"Sorry, I encountered an error: {str(e)}"
+            finally:
+                # Clear processing flag after completion
+                st.session_state.processing_message = None
+        
+        # Step 3: Progressive rendering - Update placeholder with final response
+        # This happens AFTER spinner completes (UI rendering after backend call)
+        # Using placeholder update method (more stable than st.write_stream)
+        with response_placeholder.container():
+            with st.chat_message("assistant", avatar="🤖"):
+                # Clean response display - ensure no raw JSON or debug output
+                content = response
+                if content and not content.startswith("{") and not content.startswith("["):
+                    st.markdown(content)
+                else:
+                    st.error("Response format error. Please try again.")
+        
+        # Add assistant message to session state for persistence
         st.session_state.messages.append({"role": "assistant", "content": response})
         
-        # Rerun to display updated messages
+        # Rerun to display updated messages in chat history
         st.rerun()
 
 # Footer

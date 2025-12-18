@@ -73,6 +73,10 @@ class EcommerceChatbot:
         self.pending_order: Optional[Dict] = None
         self.order_count = 0
         
+        # Active intent tracking for multi-turn stability
+        # Format: {"type": "search", "categories": ["clothing", "sports"], "query": "clothing, sports and home"}
+        self.active_intent: Optional[Dict] = None
+        
         # Initialize shopping cart
         self.cart = CartManager.get_cart(self.session_id)
         
@@ -363,7 +367,7 @@ class EcommerceChatbot:
                 "type": "function",
                 "function": {
                     "name": "create_order",
-                    "description": "Create a single order directly (bypasses cart). Use for quick single-item purchases.",
+                    "description": "Create a single order directly (bypasses cart). Use ONLY when the user EXPLICITLY expresses order intent with clear phrases like 'I'll take it', 'place order', 'buy', 'purchase', 'confirm order', 'I want to buy', 'order it', 'I'll buy', 'checkout'. CRITICAL: Do NOT use this function if the user just says 'yes' or 'ok' after liking a product without explicit order intent. If user says 'I like X' followed by 'yes', ask for clarification: 'Do you want me to place an order?' instead of calling this function.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -435,7 +439,7 @@ class EcommerceChatbot:
             if function_name == "search_products":
                 query = arguments.get("query", "")
                 sort_by = arguments.get("sort_by", "relevance")
-                products = self.rag_agent.search_products(query, k=5, sort_by=sort_by)
+                products = self.rag_agent.search_products(query, k=10, sort_by=sort_by)
                 
                 # Check if results are grouped by category (dict) or flat list
                 if isinstance(products, dict):
@@ -477,21 +481,49 @@ class EcommerceChatbot:
                             except: pass
                             # #endregion
                             result_text += f"**{display_name}:**\n"
-                            for i, p in enumerate(category_products, 1):
+                            # Limit displayed products to ≤8 per category for better performance
+                            display_limit = min(8, len(category_products))
+                            for i, p in enumerate(category_products[:display_limit], 1):
                                 stock_msg = "in stock" if p['stock_status'] == "in_stock" else f"{p['stock_status']}"
                                 result_text += f"  {i}. {p['name']} - ${p['price']:.2f} ({stock_msg})\n"
+                            if len(category_products) > display_limit:
+                                result_text += f"  ... and {len(category_products) - display_limit} more\n"
                             result_text += "\n"
-                            all_products.extend(category_products)
+                            all_products.extend(category_products[:display_limit])
                             if not self.last_product and category_products:
                                 self.last_product = category_products[0]['name']
                             self.browsed_products.extend(category_products[:2])
                     if not all_products:
-                        return {
-                            "success": False,
-                            "result": "No products found matching your search. Please try different keywords or filters.",
-                            "products": [],
-                            "query": query
-                        }
+                        # Clear intent on empty results
+                        self.active_intent = None
+                        # Extract requested categories for better error message
+                        requested_categories = list(products.keys()) if isinstance(products, dict) else []
+                        if requested_categories:
+                            category_display = ", ".join([cat.replace("_", " ").title() for cat in requested_categories])
+                            return {
+                                "success": False,
+                                "result": f"No {category_display} products available matching your search. Would you like to see products from other categories instead?",
+                                "products": [],
+                                "query": query,
+                                "empty_categories": requested_categories
+                            }
+                        else:
+                            return {
+                                "success": False,
+                                "result": "No products found matching your search. Please try different keywords or filters.",
+                                "products": [],
+                                "query": query
+                            }
+                    
+                    # Store active intent for multi-turn stability
+                    categories_list = list(products.keys())
+                    self.active_intent = {
+                        "type": "search",
+                        "categories": categories_list,
+                        "query": query
+                    }
+                    logger.debug(f"Stored active intent: {self.active_intent}")
+                    
                     return {
                         "success": True,
                         "result": result_text,
@@ -501,12 +533,28 @@ class EcommerceChatbot:
                     }
                 # Single category or no category - existing logic
                 if not products:
-                    return {
-                        "success": False,
-                        "result": "No products found matching your search. Please try different keywords or filters.",
-                        "products": [],
-                        "query": query
-                    }
+                    # Clear intent on empty results
+                    self.active_intent = None
+                    # Extract requested categories for better error message
+                    from src.search import HybridSearch
+                    search_engine = HybridSearch()
+                    extracted_categories = search_engine._extract_categories(query)
+                    if extracted_categories:
+                        category_display = ", ".join([cat.replace("_", " ").title() for cat in extracted_categories])
+                        return {
+                            "success": False,
+                            "result": f"No {category_display} products available matching your search. Would you like to see products from other categories instead?",
+                            "products": [],
+                            "query": query,
+                            "empty_categories": extracted_categories
+                        }
+                    else:
+                        return {
+                            "success": False,
+                            "result": "No products found matching your search. Please try different keywords or filters.",
+                            "products": [],
+                            "query": query
+                        }
                 # Only use filtered products, no fallback
                 self.last_product = products[0]['name']
                 self.browsed_products.extend(products[:3])
@@ -518,11 +566,15 @@ class EcommerceChatbot:
                         f"{p['description'][:200]}..."
                     )
                 else:
+                    # Limit displayed products to ≤8 for better performance
+                    display_limit = min(8, len(products))
                     result_text = f"I found {len(products)} product(s) matching your search:\n\n"
-                    for i, p in enumerate(products, 1):
+                    for i, p in enumerate(products[:display_limit], 1):
                         stock_msg = "in stock" if p['stock_status'] == "in_stock" else f"{p['stock_status']}"
                         result_text += f"{i}. **{p['name']}** - ${p['price']:.2f} ({stock_msg})\n"
                         result_text += f"   {p['description'][:100]}...\n\n"
+                    if len(products) > display_limit:
+                        result_text += f"... and {len(products) - display_limit} more product(s)\n\n"
                 return {
                     "success": True,
                     "result": result_text,
@@ -926,6 +978,40 @@ Thank you for your purchase! 🎉
                 customer_name = arguments.get("customer_name")
                 customer_email = arguments.get("customer_email")
                 
+                # Product Disambiguation: Check if multiple products match the context
+                # If multiple products found in browsed_products or last search, ask for clarification
+                matching_products = []
+                if product_name:
+                    # Check if product_name matches multiple products
+                    for product in self.browsed_products:
+                        if product_name.lower() in product.get('name', '').lower() or product.get('name', '').lower() in product_name.lower():
+                            matching_products.append(product)
+                
+                # If multiple products match, ask for clarification
+                if len(matching_products) > 1:
+                    product_names = [p.get('name', 'Unknown') for p in matching_products[:5]]  # Limit to 5 for display
+                    product_list = " or ".join([f"**{name}**" for name in product_names])
+                    if len(matching_products) > 5:
+                        product_list += f" or {len(matching_products) - 5} more"
+                    return {
+                        "success": False,
+                        "result": f"I found multiple products matching '{product_name}'. Which one do you want: {product_list}?",
+                        "requires_clarification": True,
+                        "matching_products": [p.get('name') for p in matching_products]
+                    }
+                
+                # If no product_name or ambiguous, check browsed_products
+                if not product_name or product_name.lower() in ["it", "this", "that", "one"]:
+                    if len(self.browsed_products) > 1:
+                        product_names = [p.get('name', 'Unknown') for p in self.browsed_products[:5]]
+                        product_list = " or ".join([f"**{name}**" for name in product_names])
+                        return {
+                            "success": False,
+                            "result": f"Which product do you want: {product_list}?",
+                            "requires_clarification": True,
+                            "matching_products": [p.get('name') for p in self.browsed_products]
+                        }
+                
                 # Process order through Order Agent
                 order_data = {
                     "product_name": product_name,
@@ -1010,6 +1096,32 @@ Thank you for your purchase! 🎉
             
             # Add to chat history
             self.chat_history.append({"role": "user", "content": sanitized_input})
+            
+            # Intent Persistence: Check for continuation queries ("show me more", "more products", etc.)
+            # If active_intent exists and user asks for more, reuse the intent
+            continuation_phrases = ["show me more", "more products", "more", "continue", "keep going", "next page"]
+            is_continuation = any(phrase in sanitized_input.lower() for phrase in continuation_phrases)
+            
+            # Intent Expiry: Check if user is asking a new search or switching topics
+            # Clear active_intent if user explicitly asks for different categories or new search
+            new_search_indicators = ["show me", "find", "search for", "looking for", "what is the price", "how much"]
+            is_new_search = any(indicator in sanitized_input.lower() for indicator in new_search_indicators)
+            
+            # If continuation query and active_intent exists, reuse it
+            if is_continuation and self.active_intent and self.active_intent.get("type") == "search":
+                # Reuse active intent for continuation - modify user input to include original query
+                original_query = self.active_intent.get("query", "")
+                categories = self.active_intent.get("categories", [])
+                # Expand continuation query to include original search context
+                if original_query:
+                    sanitized_input = f"{original_query} more products"
+                    logger.info(f"Reusing active intent: {categories} for continuation query")
+                    # Update chat history with expanded query for context
+                    self.chat_history[-1]["content"] = sanitized_input
+            elif is_new_search:
+                # Clear previous intent when new search is detected
+                self.active_intent = None
+                logger.debug("Cleared active_intent due to new search query")
             
             # Build messages for OpenAI
             messages = [
@@ -1188,15 +1300,15 @@ Always use exact prices from search results."""
                                             )
                                         else:
                                             response_parts = [f"I found {len(products)} product(s):\n\n"]
-                                            # Show all products for stock queries, else show only 5
-                                            display_products = products if show_all_stock else products[:5]
+                                            # Show all products for stock queries, else show only 8 (limit for performance)
+                                            display_products = products if show_all_stock else products[:8]
                                             for i, product in enumerate(display_products, 1):
                                                 stock_msg = "in stock" if product['stock_status'] == "in_stock" else f"{product['stock_status']}"
                                                 response_parts.append(
                                                     f"{i}. {product['name']} - ${product['price']:.2f} ({stock_msg})\n"
                                                 )
-                                            if not show_all_stock and len(products) > 5:
-                                                response_parts.append(f"...and {len(products) - 5} more. Ask for 'all stock' to see everything.\n")
+                                            if not show_all_stock and len(products) > 8:
+                                                response_parts.append(f"...and {len(products) - 8} more. Ask for 'all stock' to see everything.\n")
                                             bot_response = "".join(response_parts)
                                     else:
                                         # Check if this was a filtered search (category + price)
@@ -1407,13 +1519,17 @@ Always use exact prices from search results."""
                                         f"{header}The {product['name']} is priced at ${product['price']:.2f} and is currently {stock_msg}."
                                     )
                                 else:
+                                    # Limit displayed products to ≤8 per category for better performance
+                                    display_limit = min(8, len(group_products))
                                     header = f"**{label}:**\n"
                                     response_parts = [header + f"I found {len(group_products)} product(s):\n\n"]
-                                    for i, product in enumerate(group_products, 1):
+                                    for i, product in enumerate(group_products[:display_limit], 1):
                                         stock_msg = "in stock" if product['stock_status'] == "in_stock" else f"{product['stock_status']}"
                                         response_parts.append(
                                             f"{i}. {product['name']} - ${product['price']:.2f} ({stock_msg})\n"
                                         )
+                                    if len(group_products) > display_limit:
+                                        response_parts.append(f"... and {len(group_products) - display_limit} more\n")
                                     bot_response_parts.append("".join(response_parts))
                             if not any_found:
                                 bot_response_parts.append("No products found for any of the requested categories. Please try different keywords.")
